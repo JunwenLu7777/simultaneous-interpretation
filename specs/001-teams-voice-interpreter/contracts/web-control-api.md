@@ -300,7 +300,7 @@
 
 - 单文件 HTML + Pico.css 1.5 + HTMX 1.9
 - 加载时通过 WebSocket 连接 `/ws/status`，并通过 `htmx` 装饰按钮触发 REST 操作
-- 启动时调用 `Notification.requestPermission()` 请求浏览器原生通知权限（用于会议中弹窗，弥补页面被遮蔽时的盲区）
+- 启动时不得调用 `Notification.requestPermission()`；异常提醒仅通过页内 Toast、浏览器标题与 favicon 徽标呈现，避免产生浏览器原生通知或 macOS 系统通知
 
 ### 5.2 关键 DOM 结构
 
@@ -342,11 +342,12 @@
 <div id="toast-container"></div>   <!-- 错误两段式提示 -->
 ```
 
-### 5.3 浏览器通知
+### 5.3 页内异常提醒
 
-- 异常事件（`service_error` / `subprocess_circuit_break`）→ `new Notification(...)` 弹原生通知
-- 用户首次启动时引导授权
-- **不**使用 macOS 系统通知中心 API（避免触碰原生 App 红线）
+- 异常事件（`service_error` / `subprocess_circuit_break`）→ `#toast-container` 渲染两段式 Toast
+- 页面标题必须追加异常徽标，例如 `[异常] Teams 同传`
+- favicon 可切换为异常状态图标；若浏览器不支持动态 favicon，必须保持页内 Toast 与标题提示可用
+- **不得**调用 `new Notification(...)`，**不得**引导浏览器原生通知授权，**不得**使用 macOS 系统通知中心 API（避免触碰 FR-014 / FR-021 / SC-009 红线）
 
 ## 6. 性能 SLA
 
@@ -380,4 +381,4 @@
 - FastAPI 0.115+
 - HTMX 1.9（CDN：`https://unpkg.com/htmx.org@1.9.12` 或本地 `static/vendor/htmx.min.js`）
 - Pico.css 1.5（同上）
-- 浏览器：Safari 16+ / Chrome 110+ / Firefox 110+（要求 WebSocket + Notification API）
+- 浏览器：Safari 16+ / Chrome 110+ / Firefox 110+（要求 WebSocket；不要求 Notification API）

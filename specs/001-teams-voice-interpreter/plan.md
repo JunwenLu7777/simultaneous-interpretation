@@ -3,17 +3,17 @@
 **分支**：`001-teams-voice-interpreter`
 **日期**：2026-05-05
 **规约**：[spec.md](spec.md)
-**输入**：从 `specs/001-teams-voice-interpreter/spec.md` 读取的功能规约（226 行；FR-001..029；SC-001..011；4 个用户故事 + 11 项边界异常；5 条 Clarifications；3 项 v1 锁定决定；3 项 v1 边界声明）
+**输入**：从 `specs/001-teams-voice-interpreter/spec.md` 读取的功能规约（226 行；FR-001..029；SC-001..011；4 个用户故事 + 11 项边界异常；5 条澄清记录；3 项 v1 锁定决定；3 项 v1 边界声明）
 
 ---
 
 ## 摘要
 
-本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Edge-TTS** 做流式 TTS，构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 800 ms 中位、整段端到端 ≤ 2.5 s p50"为目标；本计划在 Complexity Tracking 中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并在 Phase 0 通过基线 benchmark 决定是降档到量化模型还是触发宪章 IV 预算修订流程。
+本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Edge-TTS** 做流式 TTS，构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 800 ms 中位、整段端到端 ≤ 2.5 s p50"为目标；本计划在复杂度追踪中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并要求在 US1 生产实现前通过基线 benchmark 决定是降档到量化模型、替换服务栈，还是触发宪章 IV 预算修订流程。
 
 ---
 
-## 技术上下文（Technical Context）
+## 技术上下文
 
 **语言 / 版本**：Python 3.11+（与"优先 Python / Go 脚本语言"用户偏好一致；选 Python 而非 Go 的理由：`whisper.cpp` Python binding、`edge-tts`、`fastapi`、`pydantic` 全在 Python 生态成熟，Go 端等价工具链需自行封装）
 
@@ -51,7 +51,7 @@
 | 指标 | 预算 | 来源 |
 |---|---|---|
 | 首段译音延迟 p50 | ≤ 800 ms | SC-001 / 宪章 IV 端到端化 |
-| 首段译音延迟 p95 | ≤ 1200 ms | SC-001 |
+| 首段译音延迟 p95 | ≤ 1.5 s | SC-001 / SC-002 |
 | 端到端整段延迟 p50 | ≤ 2.5 s | SC-003 / 宪章 IV |
 | 端到端整段延迟 p95 | ≤ 4.0 s | SC-003 / 宪章 IV |
 | LLM 翻译首 token | ≤ 800 ms | 宪章 IV |
@@ -80,9 +80,9 @@
 
 ---
 
-## 宪章合规检查（Constitution Check）
+## 宪章合规检查
 
-> *门禁：必须在 Phase 0 研究开始前通过；Phase 1 设计后再次复检。*
+> *门禁：必须在阶段 0 研究开始前通过；阶段 1 设计后再次复检。*
 
 按 `.specify/memory/constitution.md` 四大原则逐项声明：
 
@@ -123,20 +123,21 @@
 - 错误两段式（"发生了什么 + 下一步如何做"）由 `errors.UserFacingError` 基类强制；`ruff` 自定义规则禁止任何裸 `raise Exception`
 - 1 秒内反馈：FastAPI WebSocket + 前端事件循环；首字节响应实测 ≤ 200 ms（SC-008 子集）
 - 状态可观测：Web 控制台同步显示 FR-016 全部要素（运行时长、双向最近识别 / 译文、首段 / 端到端延迟 p50/p95、三服务连接健康状态）；前端 WebSocket 推送 ≥ 5 Hz
+- 通知边界：v1 仅使用 Web 控制台页内 Toast、浏览器标签标题 / favicon 徽标提示；**不得**调用浏览器原生 `Notification` API，**不得**产生 macOS 系统通知、状态栏项或原生 App 表面（对齐 FR-014 / SC-009）
 - 设备 / 服务切换不丢上下文：`SessionStore` 内存检查点；切换事件触发 `async migrate_session()`，在 ≤ 5 秒（FR-018）内恢复
 - 默认安全可逆：CLI `start` 幂等（已活跃则按 FR-026 拒绝）；Web 控制台「停止」前显式弹确认；FR-027 导出操作不中断会话
 
 ### IV. 性能要求（不可妥协）
 
-**PARTIAL → 见下方 Complexity Tracking 行 1 / 2 / 3 / 4**。
+**部分通过 → 见下方复杂度追踪行 1 / 2 / 3 / 4**。
 
-- **首段译音 ≤ 800 ms（p50）**：宪章预算与 SC-001 一致；**实测期望 800–1200 ms**（已知风险），见 Complexity Tracking 行 3
+- **首段译音 ≤ 800 ms（p50）**：宪章预算与 SC-001 一致；**实测期望 800–1200 ms**（已知风险），见复杂度追踪行 3
 - 端到端 p50 ≤ 2.5 s / p95 ≤ 4.0 s：可达成
 - LLM 首 token ≤ 800 ms：DeepSeek streaming 实测中位 200–400 ms，可达成
 - LLM 整段 ≤ 1.5 s：可达成
 - 24h 内存增长 ≤ 5%：可达成（Whisper.cpp 子进程隔离 + supervisor respawn 限制累积泄漏）
-- **稳态 CPU ≤ 30%**：Whisper.cpp small 单核 25–40%，**临近违例**，见 Complexity Tracking 行 2
-- **稳态 RAM ≤ 500 MB**：Whisper.cpp small 占 1.0–1.5 GB，**严重超限**，见 Complexity Tracking 行 1
+- **稳态 CPU ≤ 30%**：Whisper.cpp small 单核 25–40%，**临近违例**，见复杂度追踪行 2
+- **稳态 RAM ≤ 500 MB**：Whisper.cpp small 占 1.0–1.5 GB，**严重超限**，见复杂度追踪行 1
 
 **基准测试位置**：`tests/perf/`
 
@@ -147,11 +148,11 @@
 - 双向并行场景：同时播放上述两条音频模拟真实会议
 - 长会话场景：`tests/perf/fixtures/long-cn-2h.wav`（2 小时拼接录音，模拟长会议）
 
-**基线结果**：`specs/001-teams-voice-interpreter/perf-report.md`（Phase 0 末由 benchmark 任务产出）
+**基线结果**：`specs/001-teams-voice-interpreter/perf-report.md`（US1 生产实现前由 benchmark 门禁任务产出首版，后续故事继续补齐）
 
 ---
 
-## 项目结构（Project Structure）
+## 项目结构
 
 ### 文档（本 feature）
 
@@ -159,11 +160,11 @@
 specs/001-teams-voice-interpreter/
 ├── spec.md              # 已完成（226 行）
 ├── plan.md              # 本文件（/speckit.plan 输出）
-├── research.md          # Phase 0 输出（/speckit.plan 产出）
-├── data-model.md        # Phase 1 输出（/speckit.plan 产出）
-├── quickstart.md        # Phase 1 输出（/speckit.plan 产出）
-├── perf-report.md       # Phase 0 末由 benchmark 任务产出（基线结果）
-├── contracts/           # Phase 1 输出（外部接口契约）
+├── research.md          # 阶段 0 输出（/speckit.plan 产出）
+├── data-model.md        # 阶段 1 输出（/speckit.plan 产出）
+├── quickstart.md        # 阶段 1 输出（/speckit.plan 产出）
+├── perf-report.md       # US1 生产实现前由 benchmark 门禁任务产出首版（后续故事继续补齐）
+├── contracts/           # 阶段 1 输出（外部接口契约）
 │   ├── deepseek-translate.md
 │   ├── edge-tts.md
 │   ├── whisper-cpp.md
@@ -270,22 +271,22 @@ README.md                                  # 含 SC-011 监管严格场景免责
 
 ---
 
-## Complexity Tracking
+## 复杂度追踪
 
 > 本表登记所有违反或临近违反宪章四大原则的取舍，并附理由与退出计划。
-> 任一行从「风险 / 待验证」升级为「实测命中」时，必须发起宪章 PR（按宪章治理流程升 MAJOR / MINOR）或在本表把该行从风险升级为已批准的例外。
+> 任一行从「风险 / 待验证」升级为「实测命中」时，发布必须阻断；修复路径只有两种：消除违例（例如模型降档 / 服务栈替换），或通过独立宪章修订 PR 正式调整预算。
 
 | 违例 | 为何必要 | 拒绝的更简单方案的原因 | 状态 |
 |------|---------|-----------------------|------|
-| **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%（绝对 WER 增量 + 5–8%，相对增量 ≈ 60%；BM-2 量化），会损害 SC-005「翻译可懂度 ≥ 4/5」。Phase 0 将基线 small 与 tiny 双语方案；若 small q5_0 量化版无法降到预算，**已批准例外阈值** = ≤ 1.6 GB（Whisper small 合理上限），写入 SC-010「可接受」档；超过该阈值则**触发**宪章 IV 修订 PR。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 Phase 0 BM-1 基线；已批准例外阈值已写入 SC-010 |
-| **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。Phase 0 将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。**已批准例外阈值** = ≤ 40%，写入 SC-010「可接受」档；超过该阈值则**触发**宪章 IV 修订 PR。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 Phase 0 BM-3 基线；已批准例外阈值已写入 SC-010 |
-| **行 3**：首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）| spec Q1 本地 Whisper.cpp 流式 partial 输出 hop 长度物理下限约 600 ms，无法压到云 STT 的 200 ms 级别。**已批准例外阈值** = ≤ 1200 ms p50，已直接写入 SC-001「可接受」档与 tasks.md T058 BM-10 双档通过条件；超过该阈值则**触发**：(a) 宪章 IV 修订 PR 调整端到端首段预算；或 (b) 引入"云 STT 可选 fallback"作为用户显式付费切换通道。 | 切到云 STT 违反 spec Q1 零成本；用 small 以下模型准确率不达标；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | 风险，待 Phase 0 BM-10 基线；已批准例外阈值已写入 SC-001 / SC-002 |
-| **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。Phase 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认；**触发条件** = BM-7 24h 401/403 失败率 ≥ 0.5% 或单次会话内 ≥ 3 次连续 401/403。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有 Phase 0 BM-7 退出计划 |
+| **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%（绝对 WER 增量 + 5–8%，相对增量 ≈ 60%；BM-2 量化），会损害 SC-005「翻译可懂度 ≥ 4/5」。US1 实现前门禁将基线 small 与 tiny 双语方案；≤ 1.6 GB 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成模型降档 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 US1 实现前 BM-1 基线；阈值已改为风险观测，不是发布豁免 |
+| **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。US1 实现前门禁将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。≤ 40% 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成优化 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 US1 实现前 BM-3 基线；阈值已改为风险观测，不是发布豁免 |
+| **行 3**：首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）| spec Q1 本地 Whisper.cpp 流式 partial 输出 hop 长度物理下限约 600 ms，无法压到云 STT 的 200 ms 级别。≤ 1200 ms p50 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成服务栈替换 / 降级方案，或通过独立宪章修订 PR 正式调整预算。 | 切到云 STT 违反 spec Q1 零成本；用 small 以下模型准确率不达标；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | 风险，待 US1 实现前 BM-10 与 US2 BM-10D 基线；阈值已改为风险观测，不是发布豁免 |
+| **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。阶段 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认；**触发条件** = BM-7 24h 401/403 失败率 ≥ 0.5% 或单次会话内 ≥ 3 次连续 401/403。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有阶段 0 BM-7 退出计划 |
 
 **实施前必经门禁**：
 
-1. Phase 0 末尾产出 `perf-report.md`，对行 1 / 2 / 3 给出实测数据
-2. 若实测命中违例，PR 描述中必须显式声明"宪章修订流程触发"或"在 plan.md 新增已批准例外"
+1. US1 生产实现前产出 `perf-report.md` 首版，对行 1 / 2 / 3 给出实测数据
+2. 若实测命中违例，发布必须阻断；PR 描述中必须显式声明"宪章修订流程触发"、"服务栈替换"或"模型降档"中的具体处置
 3. 行 4 的 Edge-TTS 接口可用性在每周 CI 中通过一次"金丝雀"调用验证，连续失败 ≥ 3 次自动开 issue
 
 ---
@@ -294,10 +295,10 @@ README.md                                  # 含 SC-011 监管严格场景免责
 
 | 阶段 | 产出 | 状态 |
 |---|---|---|
-| Phase 0 — Outline & Research | `research.md` | 待 `/speckit.plan` 产出 |
-| Phase 0 末 | `perf-report.md` 基线 | 待 benchmark 任务执行后产出 |
-| Phase 1 — Design & Contracts | `data-model.md` | 待 `/speckit.plan` 产出 |
-| Phase 1 — Design & Contracts | `contracts/*.md` | 待 `/speckit.plan` 产出 |
-| Phase 1 — Design & Contracts | `quickstart.md` | 待 `/speckit.plan` 产出 |
-| Phase 1 末 | Agent 上下文文件更新 | 待 `update-agent-context.sh` 执行 |
-| Phase 2 — Tasks | `tasks.md` | 由 `/speckit.tasks` 产出，**本命令不产出** |
+| 阶段 0 — 大纲与研究 | `research.md` | 已产出 |
+| US1 实现前门禁 | `perf-report.md` 基线首版 | 待 benchmark 任务执行后产出 |
+| 阶段 1 — 设计与契约 | `data-model.md` | 已产出 |
+| 阶段 1 — 设计与契约 | `contracts/*.md` | 已产出 |
+| 阶段 1 — 设计与契约 | `quickstart.md` | 已产出 |
+| 阶段 1 末 | Agent 上下文文件更新 | 待 `update-agent-context.sh` 执行 |
+| 阶段 2 — 任务 | `tasks.md` | 由 `/speckit.tasks` 产出，**本命令不产出** |

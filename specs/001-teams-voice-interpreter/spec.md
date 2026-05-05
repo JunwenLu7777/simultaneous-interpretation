@@ -7,9 +7,9 @@
 
 ---
 
-## Clarifications
+## 澄清记录
 
-### Session 2026-05-05
+### 2026-05-05 会话
 
 - Q: 远端会议方的「被翻译 / 被云端处理」是否需要显式知情同意，本规约如何处置该合规义务？ → A: **v1 完全规避**。规约显式声明本系统**不**适用于医疗、律师、政府、金融、HR 等监管严格场景，仅面向普通商务交流的个人自用；任何监管严格场景与团队/企业级部署**延至 v2**作为独立 feature 重新规约。详见「假设」段「v1 适用场景边界（合规免责）」与「成功标准」段 SC-011。
 - Q: 一台 Mac 是否支持同时运行多个并行的同传会话（多个 Teams 实例 / 多账号）？ → A: **v1 仅单会话单 Teams**。再次启动时**必须**拒绝并给出「请先停止当前会话」提示；多会话并行场景延至 v2 处理。详见 FR-026 与「假设」段「v1 单实例约束」。
@@ -169,8 +169,8 @@
 
 ### 可度量结果
 
-- **SC-001**：上行链路**端到端首段译音延迟**的中位时延 ≤ 800 ms（理想），可接受上限 ≤ 1200 ms（plan §Complexity Tracking 行 3 登记的已知风险阈值）；p95 ≤ 1.5 s。**测量定义**：起点 = 用户麦克风 `sounddevice.InputStream` callback 接收到首个非静音帧的时间戳；终点 = 本系统 `BlackHoleWriter` 写入虚拟麦克风的首个非静音字节的时间戳（远端 Teams 实际听到时刻 = 本时刻 + 不可观测的 Teams 网络上行延迟，**不**纳入 SC-001 度量）。**预算分解**：capture + STT_PARTIAL + MT_FIRST_TOKEN + TTS_FIRST_BYTE + AUDIO_ROUTE 五阶段串联；其中 MT_FIRST_TOKEN 受宪章原则 IV「LLM 翻译首 token ≤ 800 ms」独立约束（**子预算**而非端到端预算）；本 SC-001 是端到端总和的可观测代理。**已知风险**：本地 Whisper.cpp partial 物理下限约 600 ms，叠加后中位期望 800–1200 ms，已在 plan §Complexity Tracking 行 3 登记并由 tasks.md T058 BM-10 双档（理想 ≤ 800 ms / 可接受 ≤ 1200 ms）通过条件落实；**实测命中违例时**触发宪章原则 IV 修订流程，或在 plan.md 中登记为「已批准的例外」。
-- **SC-002**：下行链路**端到端首段译音延迟**中位 ≤ 800 ms（理想）/ ≤ 1200 ms（可接受）；p95 ≤ 1.5 s（数值阈值同 SC-001）。**测量定义**：远端用户的开口时刻**不可观测**（用户端无法访问远端 PC 时钟），以**远端音频经 Teams 通道首字节进入本系统 BlackHole 2ch 输入流**的时间戳作为起点代理；终点 = 本系统 `DefaultOutputWriter` 写入用户耳机/扬声器的首个非静音字节时间戳。本 SC 度量的是「Teams 输出 → 用户耳机」段，**不**含 Teams 应用本身的网络下行延迟。
+- **SC-001**：上行链路**端到端首段译音延迟**的中位时延 ≤ 800 ms；p95 ≤ 1.5 s。≤ 1200 ms 仅作为 plan §复杂度追踪行 3 登记的**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免。**测量定义**：起点 = 用户麦克风 `sounddevice.InputStream` callback 接收到首个非静音帧的时间戳；终点 = 本系统 `BlackHoleWriter` 写入虚拟麦克风的首个非静音字节的时间戳（远端 Teams 实际听到时刻 = 本时刻 + 不可观测的 Teams 网络上行延迟，**不**纳入 SC-001 度量）。**预算分解**：capture + STT_PARTIAL + MT_FIRST_TOKEN + TTS_FIRST_BYTE + AUDIO_ROUTE 五阶段串联；其中 MT_FIRST_TOKEN 受宪章原则 IV「LLM 翻译首 token ≤ 800 ms」独立约束（**子预算**而非端到端预算）；本 SC-001 是端到端总和的可观测代理。**已知风险**：本地 Whisper.cpp partial 物理下限约 600 ms，叠加后中位期望 800–1200 ms，已在 plan §复杂度追踪行 3 登记并由 tasks.md T058 BM-10 双档（目标 ≤ 800 ms / 风险观测阈值 ≤ 1200 ms）落实；**实测超过宪章预算时**发布必须阻断，直到完成服务栈替换 / 降级方案，或通过独立宪章修订 PR 正式调整预算。
+- **SC-002**：下行链路**端到端首段译音延迟**中位 ≤ 800 ms；p95 ≤ 1.5 s（数值阈值同 SC-001）。≤ 1200 ms 仅作为风险观测阈值 / 修订触发阈值，处理方式同 SC-001。**测量定义**：远端用户的开口时刻**不可观测**（用户端无法访问远端 PC 时钟），以**远端音频经 Teams 通道首字节进入本系统 BlackHole 2ch 输入流**的时间戳作为起点代理；终点 = 本系统 `DefaultOutputWriter` 写入用户耳机/扬声器的首个非静音字节时间戳。本 SC 度量的是「Teams 输出 → 用户耳机」段，**不**含 Teams 应用本身的网络下行延迟。
 - **SC-003**：端到端「整句完成」延迟 p50 ≤ 2.5 s、p95 ≤ 4.0 s（对齐宪章原则 IV）。**测量定义**：起点 = 用户/远端结束发音后 ≥ 600 ms 静音被 VAD 升级为 final 的瞬间（即 `TranscriptSegment.kind=FINAL` 写入时间戳）；终点 = 该 final 段对应的 `SynthesizedAudioSegment` 最后一个 audio chunk 写入目标设备的时间戳。本 SC 与 SC-001（首段播出）正交，覆盖整段译音从输入闭合到输出闭合的全程。
 - **SC-004**：在标准 Apple Silicon Mac（M2 及以上）、稳定 ≥ 50 Mbps 网络下，**连续 60 分钟双向同传**：用户感知中断次数 = 0（**用户感知中断**定义：用户耳机端连续 ≥ 3 秒无任何译音输出 / Web 控制台 `services_health` 出现 ≥ 1 次「unavailable」状态；子进程 supervisor 内部 respawn 在 ≤ 5 秒恢复且不影响输出，**不**计为中断）。**24 小时持续运行内存增长 ≤ 5%**（**基线测量点** = 启动后 5 分钟稳态时刻的 RSS；**适用工况** = 持续对话工况，每分钟 ≥ 30 秒有效语音输入；持续静音工况另由 SC-004b 隔离覆盖：连续 24 小时静音工况下内存增长 ≤ 2%）。
 - **SC-005**：普通话母语者在标准商务对话场景下，对译文进行盲测可懂度评分（5 分制）≥ 4/5。**盲测协议**：评估者 ≥ 5 名（母语为目标语言、有 ≥ 1 年商务会议经验）；样本 ≥ 30 对句子（覆盖 IT / 法务 / 财务 / 销售四类场景各 ≥ 7 句）；评估者**不**知晓哪条译文出自本系统、哪条出自人类参考；采用 1–5 Likert 量表；统计达标条件 = 平均分 ≥ 4.0 且 95% 置信区间下界 ≥ 3.7（n=150 样本评分点：5 评估者 × 30 句）。**专有名词 / 数字 / 日期保留正确率 ≥ 95%**：**保留**定义 = 目标语言译文中保留原始书写形式（含大小写、连字符）或采用术语表（GlossaryEntry）的目标映射；样本 = 评估者标注的 30 句中所有专有名词 / 数字 / 日期出现位置。
@@ -178,7 +178,7 @@
 - **SC-007**：从全新 Mac 用户首次执行 `git clone` / `pip install` 命令到首次成功听到一段译音 ≤ 15 分钟。**全新基线定义**：(a) macOS 13+ 已安装；(b) Homebrew 已安装且可用；(c) Python 3.11+ 已安装（`python3 --version` 可执行）；(d) 用户已注册并持有 DeepSeek API Key；(e) 网络条件 ≥ 50 Mbps；(f) 用户耳机已连接。**纳入计时**的步骤：`brew install blackhole-2ch`（约 30 秒）+ macOS 重启（约 60–90 秒）+ Whisper 模型 ≈ 470 MB 下载（约 2–4 分钟）+ Aggregate Device 创建（约 1 分钟引导）+ Teams 路由切换（约 1 分钟）+ wizard 自检（约 2 分钟）+ 首次合成 / 译音验证（约 30 秒）。**不**纳入：(a)（b）（c）的预装时间；macOS 重启所需的硬件唤醒时长。
 - **SC-008**：状态面板从识别 / 翻译事件发生到面板显示新内容的滞后 ≤ 1 秒（对齐宪章原则 III「1 秒内反馈」）。**测量定义**：起点 = 内部消息总线（asyncio Queue）中 `transcript_partial` / `transcript_final` / `translation_first_token` 事件被产生的时间戳（即子进程 stdout JSON 行被主进程消费的瞬间）；终点 = 浏览器 DOM 中对应文本节点的 `MutationObserver` 触发时刻（前端通过 WebSocket 接收 + `htmx` swap + 浏览器 paint 完成）。该滞后包含：消息总线分发 + WebSocket 推送 + 网络往返（localhost ≈ 0.5 ms）+ 前端 DOM 更新。
 - **SC-009**：系统分发产物中：原生 macOS App Bundle（`.app`）数量 = 0、Teams 插件 / Office Add-in 数量 = 0、本项目分发的内核扩展数量 = 0（用户自行 `brew install` 的第三方虚拟音频驱动如 BlackHole 2ch **不**计入本计数）。**注**：本条目本质是**分发与产物形式合规**约束（与宪章「不开发原生 Mac App」用户硬约束直接对应），**非**性能维度；保留在「成功标准」段是因为它是 v1 不可妥协的可度量验收条件，与性能 SC 共用同一审计流程；新增产物分类时优先迁移至独立的 Distribution / Compliance 段。
-- **SC-010**：在标准 Apple Silicon Mac（M2 及以上）上的稳态运行平均 CPU 占用 ≤ 30%（**理想**） / ≤ 40%（**可接受**，plan §Complexity Tracking 行 2 登记）；稳态 RAM ≤ 500 MB（**理想**） / ≤ 1.6 GB（**可接受**，plan §Complexity Tracking 行 1 登记的已批准例外阈值）。**稳态定义**：启动后 ≥ 5 分钟、双向同传持续运行、每分钟 ≥ 30 秒有效语音输入；测量窗口 = 5 分钟滚动平均；硬件基线 = M2 Pro 16 GB（Intel x86_64 单独度量，不在本 SC 范围）。**已知风险**：Whisper.cpp small q5_0 单实例 1.0–1.5 GB RAM + 25–40% CPU，**实测命中可接受阈值时**接受为已批准的例外；**实测超过可接受阈值时**触发宪章原则 IV 修订流程或降级至 `whisper-tiny` 模型。
+- **SC-010**：在标准 Apple Silicon Mac（M2 及以上）上的稳态运行平均 CPU 占用 ≤ 30%；稳态 RAM ≤ 500 MB。≤ 40% CPU 与 ≤ 1.6 GB RAM 仅作为 plan §复杂度追踪行 1 / 2 登记的风险观测阈值 / 修订触发阈值，不构成发布放行标准或发布豁免。**稳态定义**：启动后 ≥ 5 分钟、双向同传持续运行、每分钟 ≥ 30 秒有效语音输入；测量窗口 = 5 分钟滚动平均；硬件基线 = M2 Pro 16 GB（Intel x86_64 单独度量，不在本 SC 范围）。**已知风险**：Whisper.cpp small q5_0 单实例 1.0–1.5 GB RAM + 25–40% CPU；**实测超过宪章预算时**发布必须阻断，直到完成模型降档 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。
 - **SC-011**：分发产物（README、首次运行向导、Web 控制台首屏）**必须**包含一份显著位置的「监管严格场景免责声明」，明确列出医疗 / 律师 / 政府 / 金融 / HR 等不适用场景；首次运行向导**必须**以勾选确认 + 时间戳记录方式要求用户阅读，未确认时**必须**阻止启动同传会话。
 
 ---
@@ -189,7 +189,7 @@
 - **硬件环境**：Apple Silicon 或较新 Intel Mac；内置麦克风与默认扬声器/耳机已可用；用户接受安装一款主流虚拟音频设备（BlackHole 或 Loopback 或同类）。
 - **会话规模**：v1 聚焦 1:N 商务会议场景，单方向同时只有一位发言人；多人同时发言、说话人分离不在 v1 范围。
 - **语言对**：v1 仅支持中→英（上行）与英→中（下行）；其他语言对在后续版本规划。
-- **延迟语义对齐**（重要）：用户输入中「端到端 ≤ 800 ms」在本规约中具体化为 SC-001 / SC-002「首段译音延迟」（time-to-first-translated-audio），即**端到端**总和；其与宪章原则 IV「LLM 翻译首 token ≤ 800 ms」**不**等价——后者仅约束 LLM 单环节子预算（属于 SC-001 内部 MT_FIRST_TOKEN 阶段），前者覆盖 capture + STT_PARTIAL + MT_FIRST_TOKEN + TTS_FIRST_BYTE + AUDIO_ROUTE 五段串联。**两者关系**：宪章 IV 给 LLM 单段加严格约束（≤ 800 ms），本规约 SC-001 同样给端到端总和 ≤ 800 ms 约束 — 由于 STT_PARTIAL（≈ 600 ms）+ TTS_FIRST_BYTE（≈ 300 ms）+ AUDIO_ROUTE（≈ 50 ms）非零，**端到端 800 ms 与宪章 IV LLM 800 ms 在工程上不可同时无损达成**；plan §Complexity Tracking 行 3 显式登记此风险并允许 SC-001 升档至 ≤ 1200 ms（可接受）。整段端到端「整句完成」延迟另由 SC-003（p50 ≤ 2.5 s / p95 ≤ 4.0 s）独立约束。
+- **延迟语义对齐**（重要）：用户输入中「端到端 ≤ 800 ms」在本规约中具体化为 SC-001 / SC-002「首段译音延迟」（time-to-first-translated-audio），即**端到端**总和；其与宪章原则 IV「LLM 翻译首 token ≤ 800 ms」**不**等价——后者仅约束 LLM 单环节子预算（属于 SC-001 内部 MT_FIRST_TOKEN 阶段），前者覆盖 capture + STT_PARTIAL + MT_FIRST_TOKEN + TTS_FIRST_BYTE + AUDIO_ROUTE 五段串联。**两者关系**：宪章 IV 给 LLM 单段加严格约束（≤ 800 ms），本规约 SC-001 同样给端到端总和 ≤ 800 ms 约束 — 由于 STT_PARTIAL（≈ 600 ms）+ TTS_FIRST_BYTE（≈ 300 ms）+ AUDIO_ROUTE（≈ 50 ms）非零，**端到端 800 ms 与宪章 IV LLM 800 ms 在工程上不可同时无损达成**；plan §复杂度追踪行 3 显式登记此风险，并把 ≤ 1200 ms 仅作为风险观测阈值 / 修订触发阈值。整段端到端「整句完成」延迟另由 SC-003（p50 ≤ 2.5 s / p95 ≤ 4.0 s）独立约束。
 - **流式管线必备**：任何「整句录制 → 后处理 → 整段合成」的事后翻译实现**不**满足本规约；流式 STT、流式翻译、流式 TTS 三者必须同时具备。
 - **运行表面**：默认运行表面为本地后台进程 + 浏览器访问 `http://localhost:<port>` 的状态/控制页；同时提供 CLI 子命令用于启停。允许在后续迭代中追加状态栏菜单等轻量表面，但仍**不**构建原生 macOS App。
 - **隐私边界**：用户接受将原始音频与识别文本经加密通道发送至所选外部服务（DeepSeek 等）；不接受时该用户场景不在 v1 范围。
@@ -213,14 +213,14 @@
 - **v1 用户表面（已锁定）**：
   - **CLI**：Python 入口（形如 `python -m teams_voice_interpreter <subcommand>` 或 `tvi <subcommand>`，最终命令名待 plan 阶段决定）暴露 `start` / `pause` / `resume` / `stop` / `status` 子命令。
   - **本地 Web 控制台**：CLI 启动同时拉起 FastAPI（推荐）或 Flask 后端，绑定 `http://localhost:8765`（端口可配置）；前端为单页 HTML + 轻量 JS（推荐 HTMX 或原生 fetch + WebSocket，**不**引入 React / Vue 等重型框架以保持「轻量级」初衷）；面板内容覆盖 FR-016 全部要求。
-  - **错误感知**：「发生了什么 + 下一步如何做」的两段式提示渲染在 Web 控制台顶部 Toast 区；启用浏览器原生 `Notification` API（用户首次同意后）补充会议中弹窗，弥补 Web 页被遮蔽时的感知盲区；**不**使用 macOS 系统通知中心，**不**驻留状态栏，避免触发 FR-021 / SC-009 的「原生 macOS App Bundle」红线。
+  - **错误感知**：「发生了什么 + 下一步如何做」的两段式提示渲染在 Web 控制台顶部 Toast 区；当页面被遮蔽时，仅通过浏览器标签标题 / favicon 徽标与页内状态变化补充提醒；v1 **不得**调用浏览器原生 `Notification` API、**不得**使用 macOS 系统通知中心、**不得**驻留状态栏，避免触发 FR-014 用户表面约束与 FR-021 / SC-009 的分发形态红线。
   - **打包与分发**：`pip install` 或 `git clone` + `python -m`；**不**产生 `.app` 包、**不**产生状态栏菜单 bar 项、**不**产生 launchd plist 服务。
 - **服务栈风险与降级**：
   - **Edge-TTS 是非官方接口**：`edge-tts` 为社区维护的逆向调用，**不是** Microsoft Azure 官方付费 API；存在因鉴权变更或接口下线导致整线瘫痪的风险。`/speckit.plan` 阶段**必须**设计降级路径，候选：(a) 切换到 Coqui XTTS-v2 本地推理（开源、约 1.8 GB 模型）；(b) 在用户显式同意付费时回落到 ElevenLabs Flash 或 Azure Speech 流式 TTS。
-  - **延迟达成性提醒**：Whisper.cpp small 在 Apple Silicon 上流式 partial 延迟实测中位 400–800 ms；叠加 DeepSeek 流式首 token 200–400 ms、Edge-TTS 首字节 200–400 ms、虚拟音频路由约 50 ms，**端到端首段译音延迟期望中位 800–1200 ms、p95 约 1500 ms**，与 SC-001 「中位 ≤ 800 ms」存在显著达成风险。`/speckit.plan` 阶段**必须**在实施前完成基线 benchmark；若实测无法达成，**必须**走宪章原则 IV 的修订流程或在该 feature 的 `plan.md → Complexity Tracking` 中显式登记并附退出计划，**不得**默默放宽。
+  - **延迟达成性提醒**：Whisper.cpp small 在 Apple Silicon 上流式 partial 延迟实测中位 400–800 ms；叠加 DeepSeek 流式首 token 200–400 ms、Edge-TTS 首字节 200–400 ms、虚拟音频路由约 50 ms，**端到端首段译音延迟期望中位 800–1200 ms、p95 约 1500 ms**，与 SC-001 「中位 ≤ 800 ms」存在显著达成风险。`/speckit.plan` 阶段**必须**在实施前完成基线 benchmark；若实测无法达成，**必须**阻断后续实现与发布，直到完成服务栈替换、模型降档，或通过独立宪章修订 PR 正式调整预算；不得仅在 `plan.md → 复杂度追踪` 登记退出计划后继续推进，**不得**默默放宽。
   - **本地资源预算紧张**：Whisper.cpp small 持续运行约 1.0–1.5 GB RAM、单核 25–40%，与宪章 IV「稳态 RAM ≤ 500 MB、CPU ≤ 30%」预算冲突。`/speckit.plan` 阶段**必须**评估降级到 `whisper-tiny`（约 75 MB）或重新协商宪章预算。
 - **延迟基线测试 gating**：`/speckit.tasks` 必须包含一组在 plan 通过后立即执行的 benchmark 任务，覆盖：(a) Whisper.cpp small/medium 在目标设备的流式 partial 延迟分布；(b) DeepSeek streaming 首 token 延迟分布；(c) Edge-TTS 首字节延迟分布；(d) 端到端首段与整段延迟。基线结果**必须**写入 `specs/001-teams-voice-interpreter/perf-report.md`，并据此决定是否触发宪章修订或服务栈替换。
 
 ---
 
-> **澄清记录**：本规约的 3 处原始 `[NEEDS CLARIFICATION]` 已在 `/speckit.specify` 命令的交互问答阶段全部解决：(1) FR-002 → BlackHole 2ch（开源免费虚拟音频驱动）；(2) FR-007–010 → 本地 Whisper.cpp Streaming STT + DeepSeek API 翻译 + Edge-TTS 语音合成；(3) FR-014 → CLI 子命令 + 本地 Web 控制台。详见各 FR 条目括注及「假设」段的「v1 服务栈（已锁定）」「v1 音频路由方案（已锁定）」「v1 用户表面（已锁定）」三个条目。
+> **澄清记录**：本规约的 3 处原始「待澄清」项已在 `/speckit.specify` 命令的交互问答阶段全部解决：(1) FR-002 → BlackHole 2ch（开源免费虚拟音频驱动）；(2) FR-007–010 → 本地 Whisper.cpp Streaming STT + DeepSeek API 翻译 + Edge-TTS 语音合成；(3) FR-014 → CLI 子命令 + 本地 Web 控制台。详见各 FR 条目括注及「假设」段的「v1 服务栈（已锁定）」「v1 音频路由方案（已锁定）」「v1 用户表面（已锁定）」三个条目。
