@@ -271,14 +271,14 @@ ls -lt ~/.cache/teams-voice-interpreter/crash-*.log | head -5
 
 ---
 
-## 8. 性能预期（来自 SC-001..010 + 宪章 IV）
+## 8. 性能预期（来自 SC-001..013 + 宪章 IV）
 
 | 指标 | 预期 |
 |------|------|
-| 首段译音延迟 | 中位 800–1200 ms（受本地 Whisper 速度影响） |
+| 首段译音延迟 | 正式预算中位 ≤ 800 ms / p95 ≤ 1.5 s；800–1200 ms 仅为风险观测区间 |
 | 整段端到端 | 中位 ≤ 2.5 s |
 | 24h 内存增长 | ≤ 5% |
-| 稳态 RAM | 1.0–1.5 GB（已知与宪章预算冲突，详见 plan Complexity Tracking） |
+| 稳态 RAM | 正式预算 ≤ 500 MB；1.0–1.5 GB 仅为风险观测区间，详见 plan.md 复杂度追踪 |
 | 60 分钟 0 中断 | 是 |
 | 月度运行成本 | < ¥10（仅 DeepSeek 翻译） |
 
@@ -314,4 +314,4 @@ brew uninstall blackhole-2ch
 - 实施计划：[plan.md](plan.md)
 - 数据模型：[data-model.md](data-model.md)
 - 外部接口契约：[contracts/](contracts/)
-- 性能基线：[perf-report.md](perf-report.md)（待 Phase 0 末产出）
+- 性能基线：[perf-report.md](perf-report.md)（按阶段 0 / 实现期 benchmark 持续产出）

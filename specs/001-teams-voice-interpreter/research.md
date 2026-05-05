@@ -1,28 +1,28 @@
-# Phase 0 研究报告：Teams 实时双向语音同传桥（macOS）
+# 阶段 0 研究报告：Teams 实时双向语音同传桥（macOS）
 
 **关联**：[plan.md](plan.md) · [spec.md](spec.md)
 **日期**：2026-05-05
-**目的**：为 plan.md 中各技术选型给出 **Decision / Rationale / Alternatives** 三段式证据；解决所有 `NEEDS CLARIFICATION`；提出 Phase 0 末必须执行的基线 benchmark 工作清单。
+**目的**：为 plan.md 中各技术选型给出「决策 / 理由 / 备选方案」三段式证据；解决所有待澄清项；提出实现前必须执行的基线 benchmark 工作清单。
 
 ---
 
 ## 1. 流式 STT — Whisper.cpp Streaming 分支
 
-### Decision
+### 决策
 
 - **实现**：基于 `whisper.cpp` 的 Python binding `pywhispercpp`（首选）或 `faster-whisper` + 自定义流式 wrapper（后备）
 - **模型**：默认 `ggml-small-q5_0`（4-bit 量化版 small，约 200 MB 模型 + 1.0–1.2 GB 运行 RAM）；Apple Silicon 启用 Metal 后端 + Core ML encoder offload
 - **音频块**：固定 30 ms 帧 / 16 kHz / 单声道；流式滑窗 step 200–400 ms；context size 5–10 秒
 - **partial / final 策略**：每 step 输出一次 partial（含置信度），ASR 检测到稳定 token 后升级为 final；FR-013 静音 ≥ 5 s 自动 finalize 并清空缓冲
 
-### Rationale
+### 理由
 
 - spec Q1 用户决定 STT 必须本地零成本，排除云 STT
 - `pywhispercpp` 是 `whisper.cpp` 主线 Python binding，社区活跃、Metal 支持成熟
-- q5_0 量化在 Apple Silicon 上推理速度提升 ≈ 1.6×，准确率 (WER) 损失 < 1.5%（源自 whisper.cpp benchmarks）
+- q5_0 量化在 Apple Silicon 上推理速度提升 ≈ 1.6×，准确率 (WER) 损失 < 1.5%（规划估值来自 whisper.cpp 1.6+ benchmark 口径；最终发布证明只能来自 BM-1 / BM-2 本机实测，报告必须记录 whisper.cpp commit / tag、模型 SHA256、Metal / Core ML 开关）
 - Core ML encoder offload 让 encoder 跑在 ANE（Apple Neural Engine），可再降 25–40% CPU
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -32,7 +32,7 @@
 | Apple Speech Framework（系统原生） | 流式 API 限定 60 s / 单次；中文识别质量低于 Whisper；与"不开发原生 App"基调冲突（需 Swift 桥接） |
 | Vosk-API | 中文小模型识别质量明显低于 Whisper small |
 
-### Phase 0 必经 benchmark
+### 实现前必经 benchmark
 
 - BM-1：`ggml-small-q5_0` + Metal 在 M2 Pro 上的稳态 RAM / CPU / partial 延迟（持续 60 s）
 - BM-2：BM-1 vs `ggml-tiny` vs `ggml-medium-q5_0` 的 WER 对比（普通话商务测试集 30 句）
@@ -42,7 +42,7 @@
 
 ## 2. 流式翻译 — DeepSeek API SSE Streaming
 
-### Decision
+### 决策
 
 - **接口**：`POST https://api.deepseek.com/v1/chat/completions`，`stream=true`，按 SSE 协议解析 `data:` 行
 - **模型**：默认 `deepseek-chat`（V3 系列）；可配置 `deepseek-reasoner`（R1 系列，推理增强但首 token 慢 1.5×，不推荐用于实时同传）
@@ -63,14 +63,14 @@
 - **streaming 解析**：`httpx.stream("POST", ...)` + `aiter_lines()`；逐行去掉 `data: ` 前缀、解析 JSON；空 chunk 与 `[DONE]` 终止符正确处理
 - **重连策略（FR-018）**：指数退避 250 / 500 / 1000 / 2000 / 4000 ms；连续 ≥ 30 s 失败触发 FR-019 该方向停发
 
-### Rationale
+### 理由
 
 - spec Q1 用户已锁定 DeepSeek
 - `deepseek-chat` 流式首 token 实测 200–400 ms，整段（30–80 字英文）400–1500 ms，满足宪章 IV 预算
 - 术语表注入到 system prompt 是工业标准做法，无需 fine-tune
 - `httpx` 是 Python 原生 async HTTP 客户端，避免 `aiohttp` 的 event loop 兼容问题
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -79,32 +79,32 @@
 | `deepseek-reasoner` 用作翻译 | 推理 chain-of-thought 让首 token 延迟 ↑ 800 ms，违反 SC-001 |
 | Few-shot examples 注入 | 商务对话的 few-shot 难以泛化，且会占用宝贵 prompt token |
 
-### Phase 0 必经 benchmark
+### 实现前必经 benchmark
 
-- BM-4：`deepseek-chat` streaming 首 token 与整段延迟分布（200 次商务译句样本）
-- BM-5：术语表注入对翻译质量的提升（盲测 30 对句子）
+- BM-4：`deepseek-chat` streaming 首 token 与整段延迟分布（200 次商务译句样本）；报告必须记录地区（中国大陆 / 海外）、网络类型、带宽、`api.deepseek.com` RTT、TLS 是否复用
+- BM-5：术语表注入对翻译质量与首 token 延迟的影响（0 条 / 200 条术语两档，盲测 30 对句子；200 条档 `MT_FIRST_TOKEN` p95 增量应 ≤ 200 ms）
 
 ---
 
 ## 3. 流式 TTS — Edge-TTS
 
-### Decision
+### 决策
 
 - **客户端**：`edge-tts` 7.0+ Python 包，`Communicate.stream()` 异步迭代器返回 audio chunks
 - **音色**：英文默认 `en-US-AriaNeural`（friendly, conversational）；中文默认 `zh-CN-XiaoxiaoNeural`（柔和，商务）；可配置切换
 - **格式**：默认 `audio-24khz-48kbitrate-mono-mp3`；本地解码到 16 kHz PCM16 写入 BlackHole / 默认输出
 - **流式块**：edge-tts 默认 chunk ≈ 25 ms 音频；`audio_writer.py` 用 ring buffer 拼接，写入 sounddevice
-- **降级路径（plan Complexity Tracking 行 4）**：
+- **降级路径（plan 复杂度追踪行 4）**：
   - 第一档：Coqui XTTS-v2 本地推理（开源 / 1.8 GB / GPU 推荐）
   - 第二档（用户付费）：ElevenLabs Flash v2 / Azure Speech Neural TTS
 
-### Rationale
+### 理由
 
 - spec Q1 锁定免费 TTS；edge-tts 是社区主流方案
 - mp3 24 kbps mono 在网络上的下行速率仅 ≈ 3 KB/s，对带宽零压力
 - chunk 间隔 25 ms 让首字节延迟可压至 200–400 ms
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -119,18 +119,18 @@
 |------|---------|------|
 | Edge-TTS 接口被微软封禁 | 连续 ≥ 3 次 401/403 错误 | 自动切到 Coqui XTTS-v2（如已下载模型）或提示用户启用付费档 |
 | 鉴权 token 变更 | 首次启动失败 | 在 `edge_tts_client.py` 内自动重新获取 token，最多 3 次 |
-| 音频质量退化 | 用户反馈 | Phase 1 提供音色配置开关 + 切换文档 |
+| 音频质量退化 | 用户反馈 | 阶段 1 提供音色配置开关 + 切换文档 |
 
-### Phase 0 必经 benchmark
+### 实现前必经 benchmark
 
-- BM-6：Edge-TTS 首字节延迟分布（100 次中英文短句样本）
+- BM-6：Edge-TTS 首字节延迟分布（100 次中英文短句样本）；报告必须记录地区（中国大陆 / 海外）、网络类型、带宽、`speech.platform.bing.com` RTT、TLS 是否复用
 - BM-7：连续 24 h 调用稳定性（每分钟 1 次合成请求，监测 401/403 频率）
 
 ---
 
 ## 4. 虚拟音频路由 — BlackHole 2ch + Aggregate Device
 
-### Decision
+### 决策
 
 - **驱动**：BlackHole 2ch（GPL，`brew install blackhole-2ch`），需重启 macOS 一次注册
 - **上行路由**：本系统作为 sounddevice 的输出客户端写入 BlackHole 2ch；Teams 应用麦克风源选 `BlackHole 2ch`
@@ -138,13 +138,13 @@
 - **中文译音回放**：经 sounddevice 直接写入 Mac 默认输出（用户耳机），与 Teams 原英文在用户耳机端自然混合
 - **设备发现**：`audio/routing.py` 在启动时通过 `sounddevice.query_devices()` 检查 BlackHole 2ch 是否已注册；缺失时阻止启动并给出 `brew install blackhole-2ch` 指引
 
-### Rationale
+### 理由
 
 - spec Q2 用户决定 BlackHole 2ch
 - 单驱动 + 一个 Aggregate 是 macOS 原生支持的最简方案；无需用户购买 Loopback license
 - 2 通道足够单声道 STT（双通道直接降为 mono）
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -152,7 +152,7 @@
 | Loopback 商用版 | 99 USD license 与零成本路线冲突 |
 | 仅 macOS 原生 Aggregate Device | 不支持"应用音频输出 → 虚拟设备"捕获，下行链路不可行 |
 
-### Phase 0 必经验证
+### 实现前必经验证
 
 - BM-8：BlackHole 2ch 写入到 Teams 听到的端到端延迟（≤ 50 ms 路由开销验证）
 - BM-9：Aggregate Device 同时给两个目标（BlackHole + 耳机）的同步性（jitter ≤ 10 ms）
@@ -161,19 +161,19 @@
 
 ## 5. VAD（Voice Activity Detection） — WebRTC VAD
 
-### Decision
+### 决策
 
 - **库**：`webrtcvad` 2.0（基于 Google WebRTC 项目）
 - **配置**：aggressiveness mode 2（中等敏感）；30 ms 帧；连续 ≥ 167 帧（约 5 s）静音触发 FR-013 finalize
 - **回声规避**：上行 VAD 仅作用于内置麦克风输入；下行 VAD 仅作用于 BlackHole 输入，物理隔离
 
-### Rationale
+### 理由
 
 - WebRTC VAD 是 macOS / Linux / Windows 通用、零依赖（C 实现 + Python wrapper）
 - 30 ms 帧匹配 Whisper.cpp 输入颗粒度
 - mode 2 在普通会议噪声下假阳性率 < 5%
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -184,7 +184,7 @@
 
 ## 6. Web 控制台 — FastAPI + WebSocket + HTMX
 
-### Decision
+### 决策
 
 - **后端**：`fastapi` 0.115+ + `uvicorn` 0.30+；ASGI lifespan 用于会话生命周期挂钩
 - **REST 端点**：`POST /api/control/start` `POST /api/control/pause` `POST /api/control/resume` `POST /api/control/stop` `GET /api/status` `POST /api/export`
@@ -194,13 +194,13 @@
 - **鉴权**：v1 假定本地访问无需鉴权；`uvicorn` 仅绑定 `127.0.0.1`，外部不可达
 - **CORS**：禁用（仅 same-origin 访问）
 
-### Rationale
+### 理由
 
 - FastAPI 的 async + WebSocket + Pydantic 集成最优雅；类型注解传递到前端 schema
 - HTMX 是"不写 JS 也能做交互"的极简方案，符合"轻量级架构"
 - 5 Hz 推送（200 ms 间隔）满足 SC-008 「面板新内容滞后 ≤ 1 秒」的同时不刷爆带宽
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -212,19 +212,19 @@
 
 ## 7. CLI — Typer
 
-### Decision
+### 决策
 
 - **库**：`typer` 0.12（基于 click 8）
 - **入口**：`python -m teams_voice_interpreter <subcommand>` + 可选脚本入口 `tvi`（若用户运行 `pip install -e .` 注册）
 - **子命令**：`start` / `pause` / `resume` / `stop` / `status` / `wizard` / `export <session-id>` / `version`
 - **共享 state**：CLI 通过 unix domain socket（`/tmp/teams-voice-interpreter.sock`）与运行中的 FastAPI 主进程通信，确保 CLI 子命令能访问到当前活跃 SessionId 与状态
 
-### Rationale
+### 理由
 
 - Typer 的类型注解 + 自动补全 + 美观 help 是 Python CLI 现代标准
 - Unix socket 比 HTTP 本地端口更轻、避免端口竞争
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -236,19 +236,19 @@
 
 ## 8. 单实例锁（FR-026）
 
-### Decision
+### 决策
 
 - **机制**：进程启动时尝试创建 `~/.cache/teams-voice-interpreter/lock` 并 `fcntl.flock(LOCK_EX | LOCK_NB)`；持锁失败说明已有实例在跑
 - **锁文件内容**：JSON `{"pid": int, "started_at": iso8601, "session_id": str, "web_port": int}`
 - **健康自检**：尝试 `kill -0 <pid>` 验证锁主仍存活；存活则拒绝并把锁主信息显示给用户；不存活则视为僵尸锁，自动清理后获取
 - **清理**：进程正常退出 + `atexit` + 信号处理器 三重保障删除锁文件
 
-### Rationale
+### 理由
 
 - `fcntl.flock` 是 POSIX 标准，跨 macOS / Linux 一致
 - 锁文件含 pid 让"已活跃会话"提示能给出精确信息（FR-026 要求两段式提示）
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -260,7 +260,7 @@
 
 ## 9. 崩溃报告匿名化（FR-029）
 
-### Decision
+### 决策
 
 - **触发**：Python 主进程：`signal.signal(SIGTERM/SIGSEGV)` + `atexit` + `sys.excepthook`
 - **路径**：`~/.cache/teams-voice-interpreter/crash-<unix-ts>.log`，权限 0600
@@ -273,13 +273,13 @@
 - **明确不包含**：识别原文 / 译文文本 / 原始音频 / API Key / 用户家目录绝对路径
 - **轮转**：保留最新 20 份，按 mtime 排序删除多余项
 
-### Rationale
+### 理由
 
 - 信号处理器 + atexit 双保险覆盖各种异常退出路径
 - 0600 权限防止其他用户读取
 - 路径脱敏避免泄露用户名 / 机器名
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -291,7 +291,7 @@
 
 ## 10. 子进程 Supervisor（FR-028）
 
-### Decision
+### 决策
 
 - **形态**：`session/supervisor.py` 在主进程内以 asyncio Task 实现，监控以下子进程：
   - Whisper.cpp 推理子进程（每方向一个；上行 + 下行 = 2 个）
@@ -301,12 +301,12 @@
 - **熔断**：同一子进程 60 s 内崩溃 ≥ 3 次 → 停止该方向 + 推送两段式错误到 Web 控制台
 - **状态保留**：respawn 期间 SessionId、滚动上下文、术语表注入状态、延迟统计**不**清空
 
-### Rationale
+### 理由
 
 - asyncio Task 与 FastAPI lifespan 天然兼容
 - heartbeat 检测能发现"未死但卡住"的子进程，比单纯 exit 监控更稳健
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -318,7 +318,7 @@
 
 ## 11. 配置与凭证管理（FR-022）
 
-### Decision
+### 决策
 
 - **配置文件**：`~/.config/teams-voice-interpreter/config.toml`
   ```toml
@@ -342,12 +342,12 @@
 - **加载**：`pydantic-settings` 自动从 toml + 环境变量 + `.env`（项目本地，仅开发用）合并；环境变量优先级最高
 - **密钥**：永远不写入 toml；用户在 `~/.zshrc` 中 `export DEEPSEEK_API_KEY=...` 或 ad-hoc `DEEPSEEK_API_KEY=... tvi start`
 
-### Rationale
+### 理由
 
 - 环境变量优先 + toml 引用 = 密钥永远不落盘
 - pydantic-settings 提供统一的类型校验
 
-### Alternatives considered
+### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
@@ -359,7 +359,7 @@
 
 ## 12. 测试 fixture 录制策略
 
-### Decision
+### 决策
 
 - **音频 fixture**：
   - `conference-cn.wav` / `conference-en.wav`：从公开演讲数据集抽取 10 分钟商务对话片段（Common Voice + LibriSpeech 商务子集）
@@ -369,46 +369,46 @@
   - edge-tts：用 `pytest-recording` 录制 audio chunk 序列
   - whisper.cpp：通过 `pywhispercpp` 直接调用，不需要 fixture（本地推理结果稳定）
 
-### Rationale
+### 理由
 
 - 公开数据集避免版权 / 隐私问题
 - `respx` 是 `httpx` 官方推荐的 mock 库
 
 ---
 
-## 13. 待 Phase 0 末端基线 benchmark 工作清单
+## 13. 实现前基线 benchmark 工作清单
 
-> 按宪章 IV 与 plan.md Complexity Tracking，以下 benchmark **必须**在 Phase 0 末（即 `/speckit.tasks` 生成具体任务前）执行并把结果写入 `perf-report.md`。
+> 按宪章 IV 与 plan.md 复杂度追踪，以下 benchmark **必须**按 tasks.md 的门禁顺序执行并把结果写入 `perf-report.md`。其中 BM-1 / BM-3 / BM-10 在 US1 生产实现前即为阻断门禁；其余 BM 在对应故事检查点前补齐。
 
 | 编号 | 测试目标 | 通过条件 | 样本量 / 测量窗口 | 测量环境 | 不通过的退出动作 |
 |------|---------|----------|-------------------|---------|------------------|
-| BM-1 | `ggml-small-q5_0` Metal 稳态 RAM | ≤ 1.6 GB（plan 行 1 已批准例外阈值） | 启动后 ≥ 5 分钟稳态、5 分钟滚动平均 RSS | M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps | 触发 plan Complexity Tracking 行 1 宪章 IV 修订 PR |
+| BM-1 | `ggml-small-q5_0` Metal 稳态 RAM | 正式预算 ≤ 500 MB；≤ 1.6 GB 仅为风险观测 / 修订触发阈值 | 启动后 ≥ 5 分钟稳态、5 分钟滚动平均 RSS；报告记录 whisper.cpp commit/tag、模型 SHA256、Metal/Core ML 开关 | M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps | 超过 500 MB 即阻断发布：模型降档、服务栈替换或独立宪章修订 PR |
 | BM-2 | small q5_0 vs tiny WER 对比 | small q5_0 - tiny WER 差 ≥ 5%（绝对值，普通话商务测试集）| 30 句普通话商务句 + 30 句英文商务句；3 次重复取均值 | 同 BM-1 + 离线推理（无网络） | 选 small；差距 < 5% 时可选 tiny 满足宪章预算 |
-| BM-3 | Core ML encoder offload 后 CPU | ≤ 30%（理想）/ ≤ 40%（plan 行 2 已批准例外阈值） | 60 分钟双向同传连续运行、5 分钟滚动平均 | 同 BM-1 | 通过；超过 40% 时触发行 2 宪章 IV 修订 |
-| BM-4 | DeepSeek streaming 首 token 延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 200 次商务译句样本（中→英 100 + 英→中 100）；记录 95% 置信区间 | M2 Pro / Wi-Fi ≥ 50 Mbps / 中国大陆 + 海外双地理点各跑一遍 | 失败：联系 DeepSeek 支持或切付费高优先级通道 |
-| BM-5 | 术语表注入对译文质量提升 | 盲测分提升 ≥ 0.3 分（5 分制）；95% CI 下界 ≥ 0.1 | 5 评估者 × 30 对句子 = 150 评分点；按 SC-005 盲测协议 | 同 BM-4 | 失败：保留术语表但降为可选；不强制注入 |
-| BM-6 | Edge-TTS 首字节延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 100 次中英文短句（中文 50 + 英文 50） | 同 BM-4 | 失败：转 Coqui XTTS-v2 评估 |
+| BM-3 | Core ML encoder offload 后 CPU | 正式预算 ≤ 30%；≤ 40% 仅为风险观测 / 修订触发阈值 | 60 分钟双向同传连续运行、5 分钟滚动平均；报告记录 whisper.cpp commit/tag、模型 SHA256、Metal/Core ML 开关 | 同 BM-1 | 超过 30% 即阻断发布：优化、模型降档、服务栈替换或独立宪章修订 PR |
+| BM-4 | DeepSeek streaming 首 token 延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 200 次商务译句样本（中→英 100 + 英→中 100）；记录 95% 置信区间、网络 RTT、TLS 复用状态 | M2 Pro / Wi-Fi ≥ 50 Mbps / 中国大陆 + 海外双地理点各跑一遍 | 失败：联系 DeepSeek 支持、切付费高优先级通道或服务栈替换 |
+| BM-5 | 术语表注入对译文质量与延迟的影响 | 盲测分提升 ≥ 0.3 分（5 分制）且 95% CI 下界 ≥ 0.1；200 条术语相对 0 条术语的 `MT_FIRST_TOKEN` p95 增量 ≤ 200 ms | 5 评估者 × 30 对句子 = 150 评分点；0 条 / 200 条术语两档各跑 100 次首 token 延迟 | 同 BM-4 | 失败：术语表 top-K 裁剪、提示拆分术语表或降低默认上限 |
+| BM-6 | Edge-TTS 首字节延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 100 次中英文短句（中文 50 + 英文 50）；记录 `speech.platform.bing.com` RTT、TLS 复用状态 | M2 Pro / Wi-Fi ≥ 50 Mbps / 中国大陆 + 海外双地理点各跑一遍 | 失败：转 Coqui XTTS-v2 评估 |
 | BM-7 | Edge-TTS 24h 稳定性 | 401/403 失败率 < 0.5%（即 24h 内失败 < 7.2 次）| 24 小时持续运行，每分钟 1 次 ping = 1440 次调用 | 同 BM-1 | 失败：触发 plan 行 4 自动切 Coqui XTTS-v2 |
 | BM-8 | BlackHole 2ch 路由开销 | p95 ≤ 50 ms | 100 次「写入字节 → 回环捕获字节」延迟测量 | 同 BM-1 + Aggregate Device 已配置 | 失败：检查 Aggregate Device 配置或更新 BlackHole 版本 |
 | BM-9 | Aggregate Device jitter | ≤ 10 ms（写入两个目标的时间戳差 p95）| 100 次同步写入测量 | 同 BM-8 | 失败：建议用户改单耳机 / 单 BlackHole 冗余路由 |
-| BM-10 | 端到端首段译音 p50 / p95 | p50 ≤ 800 ms（理想）/ ≤ 1200 ms（可接受，写入 SC-001 已批准档）；p95 ≤ 1500 ms | 60 分钟双向同传 ≈ 200 段对话（按 spec edge case 估算） | 同 BM-1 | 失败：触发 plan 行 3 宪章修订 PR 或加云 STT fallback |
-| BM-11 | 端到端整段延迟 p50 / p95 | p50 ≤ 2.5 s / p95 ≤ 4.0 s（对齐 SC-003 与宪章 IV）| 同 BM-10 同样本 | 同 BM-1 | 失败：触发 Complexity Tracking 新行登记 |
+| BM-10 | 端到端首段译音 p50 / p95 | p50 ≤ 800 ms；p95 ≤ 1.5 s；≤ 1200 ms p50 仅为风险观测 / 修订触发阈值 | 60 分钟双向同传 ≈ 200 段对话（按 spec edge case 估算） | 同 BM-1 | 超过正式预算即阻断发布：服务栈替换、模型降档或独立宪章修订 PR |
+| BM-11 | 端到端整段延迟 p50 / p95 | p50 ≤ 2.5 s / p95 ≤ 4.0 s（对齐 SC-003 与宪章 IV）| 同 BM-10 同样本 | 同 BM-1 | 失败：触发 plan.md 复杂度追踪新行登记 |
 | BM-12 | 60 分钟会话「用户感知中断」次数 | = 0（按 SC-004 用户感知中断定义：≥ 3 秒无译音输出 / services_health unavailable；单次 supervisor respawn ≤ 5 秒不计） | 单次连续 60 分钟会话 × 至少 5 次重复 | 同 BM-1 | 失败：检查 supervisor 熔断阈值或子进程稳定性 |
 | BM-13 | 24h 内存增长 | ≤ 5%（持续对话工况，按 SC-004 基线 = 启动后 5 分钟稳态 RSS）| 24 小时持续运行；每 5 分钟取一次 RSS 共 288 个点 | 同 BM-1 | 失败：定位泄漏并修复 |
 
 ---
 
-## 14. 解决的 NEEDS CLARIFICATION 项（Phase 0 出口）
+## 14. 解决的待澄清项（阶段 0 出口）
 
-本研究阶段无新增 `NEEDS CLARIFICATION`；spec.md 中 5 条原始 Clarifications 已在 `/speckit.clarify` 阶段全部 resolve。Technical Context 全字段确定。
+本研究阶段无新增待澄清项；spec.md 中 5 条原始澄清记录已在 `/speckit.clarify` 阶段全部解决。技术上下文字段已确定。
 
 ---
 
-## 15. Phase 0 出口断言
+## 15. 阶段 0 出口断言
 
-- ✅ 所有技术选型 Decision / Rationale / Alternatives 三段齐全
-- ✅ 13 项基线 benchmark 工作清单已列出，待 `/speckit.tasks` 阶段细化为具体任务
-- ✅ 4 项已知风险（plan.md Complexity Tracking 行 1–4）已在 BM-1/2/3/6/7/10 中明确测量方法与退出动作
-- ✅ 无未解决 `NEEDS CLARIFICATION`
+- ✅ 所有技术选型「决策 / 理由 / 备选方案」三段齐全
+- ✅ 13 项基线 benchmark 工作清单已列出，并已由 tasks.md 细化为具体任务
+- ✅ 4 项已知风险（plan.md 复杂度追踪行 1–4）已在 BM-1/2/3/6/7/10 中明确测量方法与退出动作
+- ✅ 待澄清项已全部闭合
 
-**进入 Phase 1：Design & Contracts。**
+**进入阶段 1：设计与契约。**

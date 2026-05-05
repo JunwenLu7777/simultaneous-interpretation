@@ -95,15 +95,15 @@ class WhisperStreamingClient:
 |------|------|---------|----------|
 | partial 延迟（音频末尾 → partial 文本） | ≤ 800 ms | 400–700 ms | `LatencySample(stage=STT_PARTIAL)` |
 | final 延迟（VAD 触发 → final 文本） | ≤ 200 ms 增量 | 100–200 ms | `LatencySample(stage=STT_FINAL)` |
-| 稳态 RAM（**违反宪章 IV ≤ 500 MB；plan §Complexity Tracking 行 1 已批准例外阈值；spec §SC-010 已批准档**） | ≤ 1.6 GB（已批准的例外，超过则触发宪章 IV 修订 PR）| 1.0–1.5 GB | `psutil` 子进程监控；测量窗口 = 启动后 ≥ 5 分钟稳态、5 分钟滚动平均 |
-| 稳态 CPU（**临近违反宪章 IV ≤ 30%；plan §Complexity Tracking 行 2 已批准例外阈值；spec §SC-010 已批准档**）| ≤ 30%（理想）/ ≤ 40%（已批准的例外）| 25–40% | `psutil` 子进程监控；同上测量窗口 |
+| 稳态 RAM（宪章 IV 正式预算 ≤ 500 MB；plan §复杂度追踪行 1 登记风险） | 正式预算 ≤ 500 MB；≤ 1.6 GB 仅为风险观测 / 修订触发阈值 | 1.0–1.5 GB | `psutil` 子进程监控；测量窗口 = 启动后 ≥ 5 分钟稳态、5 分钟滚动平均；BM 报告必须记录 whisper.cpp commit/tag 与模型 SHA256 |
+| 稳态 CPU（宪章 IV 正式预算 ≤ 30%；plan §复杂度追踪行 2 登记风险）| 正式预算 ≤ 30%；≤ 40% 仅为风险观测 / 修订触发阈值 | 25–40% | `psutil` 子进程监控；同上测量窗口；BM 报告必须记录 Metal / Core ML 开关 |
 
 ## 8. 错误处理契约
 
 | 错误 | 客户端动作 |
 |------|-----------|
 | 模型文件缺失 | 阻止启动，提示用户运行 `tvi wizard` |
-| 模型加载失败（OOM） | 自动降档：small → tiny；记录到崩溃报告 |
+| 模型加载失败（OOM） | 仅在 STARTING 阶段允许自动降档：small → tiny；记录到崩溃报告与 perf-report。ACTIVE 会话中不得静默降档，必须停止该方向并给出两段式提示，避免用户听到未标记的识别质量突变 |
 | 子进程崩溃（exit code != 0） | FR-028 supervisor 自动 respawn ≤ 5 s；连续 ≥ 3 次熔断 |
 | heartbeat 超时 | 同上 respawn |
 | Metal 后端不可用 | 自动 fallback CPU；warning 提示用户性能下降 |

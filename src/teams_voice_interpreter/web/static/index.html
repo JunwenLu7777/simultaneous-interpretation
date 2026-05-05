@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Teams 同传控制台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main>
+      <section class="toolbar">
+        <button data-action="start">开始</button>
+        <button data-action="pause">暂停</button>
+        <button data-action="resume">继续</button>
+        <button data-action="stop">停止</button>
+      </section>
+      <section id="services-health" class="panel">
+        <span data-service="stt">STT healthy</span>
+        <span data-service="mt">MT healthy</span>
+        <span data-service="tts">TTS healthy</span>
+      </section>
+      <section id="latency-panel" class="panel">
+        <strong>延迟</strong>
+        <span id="first-seg">首段 -- ms</span>
+        <span id="full-seg">整段 -- ms</span>
+      </section>
+      <section class="grid">
+        <article class="panel">
+          <h2>上行（中 → 英）</h2>
+          <p id="uplink-source"></p>
+          <p id="uplink-target"></p>
+        </article>
+        <article class="panel">
+          <h2>下行（英 → 中）</h2>
+          <p id="downlink-source"></p>
+          <p id="downlink-target"></p>
+        </article>
+      </section>
+      <div id="toast" role="status" aria-live="polite"></div>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

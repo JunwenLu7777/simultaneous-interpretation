@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "teams-voice-interpreter"
+version = "0.1.0"
+description = "macOS Teams 双向实时语音同传桥"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "simultaneous-interpretation contributors" }]
+dependencies = [
+  "pywhispercpp>=1.3.0",
+  "httpx>=0.27.0",
+  "edge-tts>=7.0.0",
+  "sounddevice>=0.4.7",
+  "numpy>=1.26.0",
+  "webrtcvad>=2.0.10",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "websockets>=12.0",
+  "typer>=0.12.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+  "pytest-mock>=3.0.0",
+  "pytest-benchmark>=4.0.0",
+  "coverage>=7.0.0",
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "radon>=6.0.0",
+  "respx>=0.21.0",
+]
+
+[project.scripts]
+tvi = "teams_voice_interpreter.cli.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/teams_voice_interpreter"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+  ".omc",
+  ".omx",
+  ".serena",
+  "specs",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "C90", "TRY002"]
+ignore = []
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+disallow_untyped_defs = true
+warn_return_any = true
+no_implicit_optional = true
+packages = ["teams_voice_interpreter"]
+
+[[tool.mypy.overrides]]
+module = ["sounddevice", "webrtcvad", "edge_tts", "pywhispercpp"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+  "--strict-markers",
+  "--strict-config",
+  "--disable-warnings",
+  "--import-mode=importlib",
+]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "perf: 性能基准测试",
+  "contract: 第三方边界契约测试",
+  "integration: 端到端集成测试",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["teams_voice_interpreter"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]

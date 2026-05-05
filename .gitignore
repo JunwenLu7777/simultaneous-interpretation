@@ -11,3 +11,25 @@
 .omx/*
 .omx/
 .serena/
+
+# Python build/test artifacts
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.coverage.*
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local runtime and credentials
+.env
+.env.*
+.omc/state/
+.omc/sessions/
+.cache/teams-voice-interpreter/whisper-models/
+~/.cache/teams-voice-interpreter/whisper-models/

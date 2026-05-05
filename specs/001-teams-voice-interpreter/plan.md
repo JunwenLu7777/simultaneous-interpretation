@@ -3,7 +3,7 @@
 **分支**：`001-teams-voice-interpreter`
 **日期**：2026-05-05
 **规约**：[spec.md](spec.md)
-**输入**：从 `specs/001-teams-voice-interpreter/spec.md` 读取的功能规约（226 行；FR-001..029；SC-001..011；4 个用户故事 + 11 项边界异常；5 条澄清记录；3 项 v1 锁定决定；3 项 v1 边界声明）
+**输入**：从 `specs/001-teams-voice-interpreter/spec.md` 读取的功能规约（FR-001..029；SC-001..013；4 个用户故事 + 11 项边界异常；5 条澄清记录；3 项 v1 锁定决定；3 项 v1 边界声明）
 
 ---
 
@@ -59,6 +59,24 @@
 | 24h 内存增长 | ≤ 5% | SC-004 / 宪章 IV |
 | 稳态 CPU（Apple Silicon） | ≤ 30% | SC-010 / 宪章 IV |
 | 稳态 RAM | ≤ 500 MB | SC-010 / 宪章 IV |
+| 已安装用户冷启动 p95 | ≤ 10 s | SC-012 |
+| 暂停/继续恢复 p95 | ≤ 2 s | SC-013 |
+| 设备切换接管 p95 | ≤ 5 s | SC-013 |
+
+**阶段级延迟预算矩阵**（对应 `LatencyStage`，所有 BM 报告必须按本表输出）：
+
+| 阶段 | 预算 | 适用方向 | 对应 BM / SC |
+|---|---:|---|---|
+| `AUDIO_CAPTURE` | p95 ≤ 50 ms | 上行 / 下行 | BM-8 / BM-9 |
+| `STT_PARTIAL` | p50 ≤ 700 ms，p95 ≤ 800 ms | 上行 / 下行 | BM-1 / BM-10 / BM-10D |
+| `STT_FINAL` | VAD close_segment 后 ≤ 200 ms | 上行 / 下行 | BM-1 / FR-013 |
+| `MT_FIRST_TOKEN` | p50 ≤ 400 ms，p95 ≤ 800 ms | 中→英 / 英→中 | BM-4 |
+| `MT_COMPLETED` | p50 ≤ 1.5 s，p95 ≤ 2.5 s | 中→英 / 英→中 | BM-4 / SC-003 |
+| `TTS_FIRST_BYTE` | p50 ≤ 400 ms，p95 ≤ 800 ms | 英文 / 中文 | BM-6 |
+| `TTS_COMPLETED` | p50 ≤ 1.5 s | 英文 / 中文 | BM-6 / SC-003 |
+| `AUDIO_ROUTE` | p95 ≤ 50 ms；Aggregate jitter p95 ≤ 10 ms | BlackHole / 默认输出 | BM-8 / BM-9 |
+| `E2E_FIRST_SEG` | p50 ≤ 800 ms，p95 ≤ 1.5 s | 上行 / 下行 | BM-10 / BM-10D / SC-001 / SC-002 |
+| `E2E_FULL` | p50 ≤ 2.5 s，p95 ≤ 4.0 s | 上行 / 下行 | BM-11 / SC-003 |
 
 **约束**：
 
@@ -149,6 +167,45 @@
 - 长会话场景：`tests/perf/fixtures/long-cn-2h.wav`（2 小时拼接录音，模拟长会议）
 
 **基线结果**：`specs/001-teams-voice-interpreter/perf-report.md`（US1 生产实现前由 benchmark 门禁任务产出首版，后续故事继续补齐）
+
+**perf-report.md schema**（所有 BM 段必须包含）：
+
+- `benchmark_id`：例如 `BM-10`
+- `sc_refs`：关联的 SC / FR / 宪章条款
+- `git_commit`、`timestamp`、`operator`
+- `hardware`：机型、CPU/GPU、RAM、macOS 版本、架构
+- `dependency_versions`：`whisper.cpp` / `pywhispercpp` / `edge-tts` / `httpx` / `fastapi` / `sounddevice`
+- `model_artifacts`：模型文件名、SHA256、whisper.cpp commit 或 tag、Core ML / Metal 开关
+- `network_profile`：地区、网络类型、带宽、目标域名 RTT、TLS 是否复用
+- `workload`：fixture 名称、SHA256、样本量、持续时间、方向
+- `metrics`：p50、p95、平均、最大、置信区间、样本数
+- `budget`：对应预算、Pass / Fail、与预算差值
+- `exit_action`：无 / 模型降档 / 服务栈替换 / 宪章修订 PR / 新增 issue
+
+**SC / BM / 宪章追踪矩阵**：
+
+| 条款 | 证明 BM / 任务 | 说明 |
+|---|---|---|
+| SC-001 上行首段 | BM-10 / T058 | 上行 `E2E_FIRST_SEG` p50 / p95 |
+| SC-002 下行首段 | BM-10D / T073 | 下行 `E2E_FIRST_SEG` p50 / p95 |
+| SC-003 整段延迟 | BM-11 / T101 | `E2E_FULL` p50 / p95 |
+| SC-004 长会话稳定 | BM-12 / BM-13 / T102 / T103 | 60 分钟中断、1h/6h/12h/24h 内存增长 |
+| SC-005 可懂度与保真 | BM-2 / BM-5 / T053 / T055 | WER、盲测、术语/数字/日期/金额/人名保留 |
+| SC-006 瞬时错误可见 | T082 / T083 / T088..T090 | 第一次失败 ≤ 5 秒提示，retry 状态先于最终失败 |
+| SC-007 首次安装 | T095 / T096 / T107 | 全新 Mac 到首次译音 ≤ 15 分钟 |
+| SC-008 面板滞后 | T076 / T078 | WebSocket + DOM 更新 ≤ 1 秒 |
+| SC-009 分发形态 | T107 | `.app` / Teams Add-in / Office Add-in / 本项目内核扩展 = 0 |
+| SC-010 CPU / RAM | BM-1 / BM-3 / T052 | 双向同传 + Web 控制台组合负载 |
+| SC-011 免责声明 | T095 / T105 | README、向导、Web 首屏均覆盖 |
+| SC-012 冷启动 | T107 | 已安装用户 start → ready p95 ≤ 10 秒 |
+| SC-013 操作恢复 | T082 / T087 / T094 | pause/resume、设备切换、网络恢复 |
+
+**性能违例处置模板**：
+
+1. 若 BM 超过正式预算但未超过风险观测阈值：阻断后续实现 / 发布，记录为 `exit_action=model_downgrade`、`stack_replacement` 或 `constitution_revision_pr`。
+2. 若 BM 超过风险观测阈值：必须停止该实现路径，优先模型降档或服务栈替换。
+3. 若选择宪章修订：必须单独 PR 修改 `.specify/memory/constitution.md`，同步 spec / plan / tasks / contracts，并在 `perf-report.md` 对应 BM 段链接该 PR。
+4. 不允许仅以「已知风险」「复杂度追踪已登记」作为继续实现或发布的理由。
 
 ---
 
