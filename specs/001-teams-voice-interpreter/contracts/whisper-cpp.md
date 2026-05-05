@@ -95,8 +95,8 @@ class WhisperStreamingClient:
 |------|------|---------|----------|
 | partial 延迟（音频末尾 → partial 文本） | ≤ 800 ms | 400–700 ms | `LatencySample(stage=STT_PARTIAL)` |
 | final 延迟（VAD 触发 → final 文本） | ≤ 200 ms 增量 | 100–200 ms | `LatencySample(stage=STT_FINAL)` |
-| 稳态 RAM（**违反宪章 IV，见 plan Complexity Tracking 行 1**） | ≤ 1.6 GB（已批准的例外） | 1.0–1.5 GB | `psutil` 子进程监控 |
-| 稳态 CPU（**临近违反，见 plan Complexity Tracking 行 2**） | ≤ 30%（理想）/ ≤ 40%（已批准的例外）| 25–40% | `psutil` 子进程监控 |
+| 稳态 RAM（**违反宪章 IV ≤ 500 MB；plan §Complexity Tracking 行 1 已批准例外阈值；spec §SC-010 已批准档**） | ≤ 1.6 GB（已批准的例外，超过则触发宪章 IV 修订 PR）| 1.0–1.5 GB | `psutil` 子进程监控；测量窗口 = 启动后 ≥ 5 分钟稳态、5 分钟滚动平均 |
+| 稳态 CPU（**临近违反宪章 IV ≤ 30%；plan §Complexity Tracking 行 2 已批准例外阈值；spec §SC-010 已批准档**）| ≤ 30%（理想）/ ≤ 40%（已批准的例外）| 25–40% | `psutil` 子进程监控；同上测量窗口 |
 
 ## 8. 错误处理契约
 

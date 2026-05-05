@@ -380,21 +380,21 @@
 
 > 按宪章 IV 与 plan.md Complexity Tracking，以下 benchmark **必须**在 Phase 0 末（即 `/speckit.tasks` 生成具体任务前）执行并把结果写入 `perf-report.md`。
 
-| 编号 | 测试目标 | 通过条件 | 不通过的退出动作 |
-|------|---------|----------|------------------|
-| BM-1 | `ggml-small-q5_0` Metal 稳态 RAM | ≤ 1.6 GB | 触发 plan Complexity Tracking 行 1 升级（宪章 IV 修订） |
-| BM-2 | small q5_0 vs tiny WER 对比（30 句） | small q5_0 - tiny WER 差 ≥ 5% | 选 small；否则可选 tiny 满足宪章预算 |
-| BM-3 | Core ML encoder offload 后 CPU | ≤ 30% | 通过；否则触发行 2 升级 |
-| BM-4 | DeepSeek streaming 首 token 延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 失败：联系 DeepSeek 支持或切付费高优先级通道 |
-| BM-5 | 术语表注入对译文质量提升 | 盲测分提升 ≥ 0.3 分（5 分制） | 失败：保留术语表但降为可选 |
-| BM-6 | Edge-TTS 首字节延迟 | p50 ≤ 400 ms | 失败：转 Coqui XTTS-v2 评估 |
-| BM-7 | Edge-TTS 24h 稳定性 | 401/403 < 0.5% | 失败：触发 Complexity Tracking 行 4 转 Coqui |
-| BM-8 | BlackHole 2ch 路由延迟 | ≤ 50 ms | 失败：检查 Aggregate Device 配置 |
-| BM-9 | Aggregate Device jitter | ≤ 10 ms | 失败：单耳机 / 单 BlackHole 冗余路由 |
-| BM-10 | 端到端首段译音 p50 | ≤ 800 ms（理想）/ ≤ 1200 ms（可接受） | 失败：触发 Complexity Tracking 行 3 升级 |
-| BM-11 | 端到端整段 p50 / p95 | p50 ≤ 2.5 s, p95 ≤ 4.0 s | 失败：触发 Complexity Tracking 新行 |
-| BM-12 | 60 分钟 0 中断 | 0 次 supervisor 熔断 | 失败：检查 supervisor 阈值与子进程稳定性 |
-| BM-13 | 24h 内存增长 | ≤ 5% | 失败：定位泄漏并修复 |
+| 编号 | 测试目标 | 通过条件 | 样本量 / 测量窗口 | 测量环境 | 不通过的退出动作 |
+|------|---------|----------|-------------------|---------|------------------|
+| BM-1 | `ggml-small-q5_0` Metal 稳态 RAM | ≤ 1.6 GB（plan 行 1 已批准例外阈值） | 启动后 ≥ 5 分钟稳态、5 分钟滚动平均 RSS | M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps | 触发 plan Complexity Tracking 行 1 宪章 IV 修订 PR |
+| BM-2 | small q5_0 vs tiny WER 对比 | small q5_0 - tiny WER 差 ≥ 5%（绝对值，普通话商务测试集）| 30 句普通话商务句 + 30 句英文商务句；3 次重复取均值 | 同 BM-1 + 离线推理（无网络） | 选 small；差距 < 5% 时可选 tiny 满足宪章预算 |
+| BM-3 | Core ML encoder offload 后 CPU | ≤ 30%（理想）/ ≤ 40%（plan 行 2 已批准例外阈值） | 60 分钟双向同传连续运行、5 分钟滚动平均 | 同 BM-1 | 通过；超过 40% 时触发行 2 宪章 IV 修订 |
+| BM-4 | DeepSeek streaming 首 token 延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 200 次商务译句样本（中→英 100 + 英→中 100）；记录 95% 置信区间 | M2 Pro / Wi-Fi ≥ 50 Mbps / 中国大陆 + 海外双地理点各跑一遍 | 失败：联系 DeepSeek 支持或切付费高优先级通道 |
+| BM-5 | 术语表注入对译文质量提升 | 盲测分提升 ≥ 0.3 分（5 分制）；95% CI 下界 ≥ 0.1 | 5 评估者 × 30 对句子 = 150 评分点；按 SC-005 盲测协议 | 同 BM-4 | 失败：保留术语表但降为可选；不强制注入 |
+| BM-6 | Edge-TTS 首字节延迟 | p50 ≤ 400 ms / p95 ≤ 800 ms | 100 次中英文短句（中文 50 + 英文 50） | 同 BM-4 | 失败：转 Coqui XTTS-v2 评估 |
+| BM-7 | Edge-TTS 24h 稳定性 | 401/403 失败率 < 0.5%（即 24h 内失败 < 7.2 次）| 24 小时持续运行，每分钟 1 次 ping = 1440 次调用 | 同 BM-1 | 失败：触发 plan 行 4 自动切 Coqui XTTS-v2 |
+| BM-8 | BlackHole 2ch 路由开销 | p95 ≤ 50 ms | 100 次「写入字节 → 回环捕获字节」延迟测量 | 同 BM-1 + Aggregate Device 已配置 | 失败：检查 Aggregate Device 配置或更新 BlackHole 版本 |
+| BM-9 | Aggregate Device jitter | ≤ 10 ms（写入两个目标的时间戳差 p95）| 100 次同步写入测量 | 同 BM-8 | 失败：建议用户改单耳机 / 单 BlackHole 冗余路由 |
+| BM-10 | 端到端首段译音 p50 / p95 | p50 ≤ 800 ms（理想）/ ≤ 1200 ms（可接受，写入 SC-001 已批准档）；p95 ≤ 1500 ms | 60 分钟双向同传 ≈ 200 段对话（按 spec edge case 估算） | 同 BM-1 | 失败：触发 plan 行 3 宪章修订 PR 或加云 STT fallback |
+| BM-11 | 端到端整段延迟 p50 / p95 | p50 ≤ 2.5 s / p95 ≤ 4.0 s（对齐 SC-003 与宪章 IV）| 同 BM-10 同样本 | 同 BM-1 | 失败：触发 Complexity Tracking 新行登记 |
+| BM-12 | 60 分钟会话「用户感知中断」次数 | = 0（按 SC-004 用户感知中断定义：≥ 3 秒无译音输出 / services_health unavailable；单次 supervisor respawn ≤ 5 秒不计） | 单次连续 60 分钟会话 × 至少 5 次重复 | 同 BM-1 | 失败：检查 supervisor 熔断阈值或子进程稳定性 |
+| BM-13 | 24h 内存增长 | ≤ 5%（持续对话工况，按 SC-004 基线 = 启动后 5 分钟稳态 RSS）| 24 小时持续运行；每 5 分钟取一次 RSS 共 288 个点 | 同 BM-1 | 失败：定位泄漏并修复 |
 
 ---
 

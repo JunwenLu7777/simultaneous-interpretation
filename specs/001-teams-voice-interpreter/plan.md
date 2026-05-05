@@ -277,10 +277,10 @@ README.md                                  # 含 SC-011 监管严格场景免责
 
 | 违例 | 为何必要 | 拒绝的更简单方案的原因 | 状态 |
 |------|---------|-----------------------|------|
-| **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%，会损害 SC-005「翻译可懂度 ≥ 4/5」。Phase 0 将基线 small 与 tiny 双语方案；若 small q5_0 量化版无法降到预算，**触发**宪章 IV 修订把 RAM 预算放宽到 ≤ 1.6 GB（Whisper small 的合理上限）。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 Phase 0 基线 |
-| **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。Phase 0 将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。若量化方案不达标且模型档位不能再降，**触发**宪章 IV 修订把 CPU 预算放宽到 ≤ 40%。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 Phase 0 基线 |
-| **行 3**：首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）| spec Q1 本地 Whisper.cpp 流式 partial 输出 hop 长度物理下限约 600 ms，无法压到云 STT 的 200 ms 级别。Phase 0 实测后若仍不达，**触发**：(a) 调整 SC-001 到 p50 ≤ 1000 ms（仍优于行业大多数同传产品）；或 (b) 引入"云 STT 可选 fallback"作为高级用户付费切换。 | 切到云 STT 违反 spec Q1 零成本；用 small 以下模型准确率不达标；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | 风险，待 Phase 0 基线 |
-| **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。Phase 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有 Phase 0 退出计划 |
+| **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%（绝对 WER 增量 + 5–8%，相对增量 ≈ 60%；BM-2 量化），会损害 SC-005「翻译可懂度 ≥ 4/5」。Phase 0 将基线 small 与 tiny 双语方案；若 small q5_0 量化版无法降到预算，**已批准例外阈值** = ≤ 1.6 GB（Whisper small 合理上限），写入 SC-010「可接受」档；超过该阈值则**触发**宪章 IV 修订 PR。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 Phase 0 BM-1 基线；已批准例外阈值已写入 SC-010 |
+| **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。Phase 0 将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。**已批准例外阈值** = ≤ 40%，写入 SC-010「可接受」档；超过该阈值则**触发**宪章 IV 修订 PR。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 Phase 0 BM-3 基线；已批准例外阈值已写入 SC-010 |
+| **行 3**：首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）| spec Q1 本地 Whisper.cpp 流式 partial 输出 hop 长度物理下限约 600 ms，无法压到云 STT 的 200 ms 级别。**已批准例外阈值** = ≤ 1200 ms p50，已直接写入 SC-001「可接受」档与 tasks.md T058 BM-10 双档通过条件；超过该阈值则**触发**：(a) 宪章 IV 修订 PR 调整端到端首段预算；或 (b) 引入"云 STT 可选 fallback"作为用户显式付费切换通道。 | 切到云 STT 违反 spec Q1 零成本；用 small 以下模型准确率不达标；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | 风险，待 Phase 0 BM-10 基线；已批准例外阈值已写入 SC-001 / SC-002 |
+| **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。Phase 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认；**触发条件** = BM-7 24h 401/403 失败率 ≥ 0.5% 或单次会话内 ≥ 3 次连续 401/403。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有 Phase 0 BM-7 退出计划 |
 
 **实施前必经门禁**：
 
