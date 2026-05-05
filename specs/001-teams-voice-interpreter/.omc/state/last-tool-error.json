@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/junwenlu/code/simultaneous-interpretation && .specify/scripts/bash/check-prerequisites.sh --json --paths-only\",\"description\":\"运行 speckit 前置检查脚本\"}",
+  "error": "Exit code 1\nfatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\nERROR: Not on a feature branch. Current branch: HEAD\nFeature branches should be named like: 001-feature-name, 1234-feature-name, or 20260319-143022-feature-name",
+  "timestamp": "2026-05-05T03:28:53.191Z",
+  "retry_count": 1
+}

@@ -1,0 +1,11 @@
+# Claude Code agent: keep skills, ignore local/credential artifacts
+.claude/*
+!.claude/skills/
+!.claude/skills/**
+
+# Codex agent: keep skills, ignore local/credential artifacts
+.agents/*
+!.agents/skills/
+!.agents/skills/**
+.omc/*
+.omx/*
