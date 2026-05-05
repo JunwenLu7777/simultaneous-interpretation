@@ -239,7 +239,7 @@ def duplex(
     """启动真实双向同传：麦克风上行到 BlackHole，BlackHole 下行到默认输出。"""
     errors: queue.Queue[BaseException] = queue.Queue()
     route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
-    playback_gate = _PlaybackGate()
+    playback_gate: _PlaybackGate | None = _PlaybackGate() if route.shared_virtual_device else None
     typer.echo("正在加载两路 Whisper 模型；加载完成后会开始双向监听。")
     typer.echo(f"上行输出设备：{route.uplink_device.name}")
     typer.echo(f"下行输入设备：{route.downlink_device.name}")

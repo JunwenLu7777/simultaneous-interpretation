@@ -13,6 +13,7 @@ import sounddevice as sd
 from pywhispercpp.model import Model
 
 from teams_voice_interpreter.audio.capture import BlackHoleReader
+from teams_voice_interpreter.audio.resample import resample_int16_mono as _resample_int16_mono
 from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.config import load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
@@ -21,6 +22,27 @@ from teams_voice_interpreter.live_say import LiveSayBridge, SayResult
 from teams_voice_interpreter.stt.vad import VadSegmenter
 
 BLANK_TRANSCRIPT_MARKERS = {"[BLANK_AUDIO]", "[NO_SPEECH]", "[NO SPEECH]"}
+HALLUCINATION_MARKERS = frozenset(
+    {
+        "[BLANK_AUDIO]",
+        "[NO_SPEECH]",
+        "[NO SPEECH]",
+        "[MUSIC]",
+        "[NOISE]",
+        "[INAUDIBLE]",
+        "[SILENCE]",
+        "(MUSIC)",
+        "(NOISE)",
+        "(SILENCE)",
+        "(BEEP)",
+        "*PHONE RINGS*",
+        "*PHONE RINGING*",
+        "*RINGING*",
+        "*BEEP*",
+        "*MUSIC*",
+        "*NOISE*",
+    }
+)
 InputSource = Literal["default_input", "blackhole"]
 
 
@@ -388,15 +410,48 @@ class LivePushToTalkBridge:
 
 
 def _transcript_text_from_segments(segments: Iterable[WhisperSegmentLike]) -> str:
-    """把 Whisper 片段转成可翻译文本，并阻断空音频占位符。"""
+    """把 Whisper 片段转成可翻译文本，并阻断空音频/音效幻觉占位。"""
     text = "".join(str(segment.text).strip() for segment in segments).strip()
+    if not text:
+        return text
     if text.upper() in BLANK_TRANSCRIPT_MARKERS:
         raise UserFacingError(
             code="ptt.blank_audio",
             what_happened="发生了什么：麦克风录到的是空音频。",
             next_action="下一步如何做：请在提示开始录音后立刻说话，或把 `--seconds` 增加到 5。",
         )
+    if _looks_like_hallucination(text):
+        raise UserFacingError(
+            code="ptt.hallucinated_transcript",
+            what_happened=(
+                f"发生了什么：识别到的内容 `{text}` 长度过短或像 Whisper 在静音/噪声段产生的幻觉，"
+                "已丢弃以避免胡乱翻译。"
+            ),
+            next_action=(
+                "下一步如何做：请说一句更完整的话再试；若反复出现，"
+                "可调高 `--speech-rms-threshold` 减少噪声触发。"
+            ),
+        )
     return text
+
+
+def _looks_like_hallucination(text: str) -> bool:
+    """识别 Whisper 在静音/噪声段上的常见幻觉占位（音效标签、纯标点、过短输出）。"""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.upper() in HALLUCINATION_MARKERS:
+        return True
+    bare = stripped.strip("()[]<>*\"' ").strip()
+    if not bare:
+        return True
+    if bare.upper() in HALLUCINATION_MARKERS:
+        return True
+    if len(bare) <= 1:
+        return True
+    has_letter = any(c.isalpha() for c in bare)
+    has_chinese = any("一" <= c <= "鿿" for c in bare)
+    return not has_letter and not has_chinese
 
 
 def _device_default_sample_rate_hz(
@@ -415,37 +470,23 @@ def _device_default_sample_rate_hz(
     return sample_rate_hz
 
 
-def _resample_int16_mono(
-    samples: np.ndarray,
-    *,
-    source_rate_hz: int,
-    target_rate_hz: int,
-) -> np.ndarray:
-    """用线性插值把 mono int16 PCM 重采样到目标采样率。"""
-    source = np.asarray(samples, dtype=np.int16).reshape(-1)
-    if source.size == 0 or source_rate_hz == target_rate_hz:
-        return source
-    target_size = int(round(source.size * target_rate_hz / source_rate_hz))
-    if target_size <= 0:
-        return np.array([], dtype=np.int16)
-    source_positions = np.arange(source.size, dtype=np.float32)
-    target_positions = np.linspace(0, source.size - 1, num=target_size, dtype=np.float32)
-    resampled = np.interp(target_positions, source_positions, source.astype(np.float32))
-    return np.clip(np.rint(resampled), -32768, 32767).astype(np.int16)
-
-
 def _is_speech_frame(
     frame: np.ndarray,
     *,
     vad: VadSegmenter,
     rms_threshold: float,
 ) -> bool:
-    """结合 WebRTC VAD 和 RMS，降低静音触发常见幻觉的概率。"""
+    """RMS 与 WebRTC VAD 双门：必须同时通过才算人声。
+
+    取消了"高能量自动放行"的旁路——Teams 提示音、键盘敲击、风扇噪声等高能量但非人声
+    的输入会被 VAD 拒绝，从而避免 Whisper 在这些段上吐出 `*phone rings*` / `恶意!`
+    这类幻觉占位再被 DeepSeek 编造成完整句。
+    """
     samples = np.asarray(frame, dtype=np.int16).reshape(-1)
     rms = _frame_rms(samples)
-    if rms >= rms_threshold:
-        return True
-    return vad.accept(samples).is_speech and rms >= rms_threshold / 2
+    if rms < rms_threshold / 2:
+        return False
+    return vad.accept(samples).is_speech
 
 
 def _frame_rms(samples: np.ndarray) -> float:

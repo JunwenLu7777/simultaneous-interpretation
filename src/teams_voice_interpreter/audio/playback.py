@@ -9,6 +9,8 @@ import numpy as np
 import numpy.typing as npt
 import sounddevice as sd
 
+from teams_voice_interpreter.audio.resample import resample_int16_mono
+
 Int16Array = npt.NDArray[np.int16]
 
 
@@ -41,24 +43,76 @@ class InMemoryAudioSink:
 
 @dataclass
 class SoundDeviceAudioSink:
-    """通过 sounddevice 写入真实 CoreAudio 设备。"""
+    """通过 sounddevice 写入真实 CoreAudio 设备。
+
+    macOS 大多数耳机/聚合设备原生采样率是 48 kHz，PortAudio 不会自动做采样率
+    转换；如果直接喂 16 kHz PCM，会持续打印 `PaMacCore err='-50'` 的 paramErr，
+    导致每段开头有 click 或丢字。本类在首次写入时查询设备 `default_samplerate`，
+    必要时把 mono / stereo PCM 上采样到设备原生采样率后再 `sd.play`。
+    """
 
     device_index: int
     sample_rate_hz: int = 16000
     _bytes_written: int = 0
+    _device_sample_rate_hz: int | None = None
 
     def write(self, samples: Int16Array) -> None:
-        """阻塞写入 PCM16 样本。"""
+        """阻塞写入 PCM16 样本，必要时按设备原生采样率上采样。"""
         pcm = np.asarray(samples, dtype=np.int16)
         if pcm.size == 0:
             return
-        sd.play(pcm, samplerate=self.sample_rate_hz, device=self.device_index, blocking=True)
+        device_rate = self._resolve_device_sample_rate()
+        if device_rate != self.sample_rate_hz:
+            pcm = _resample_pcm_to_rate(
+                pcm,
+                source_rate_hz=self.sample_rate_hz,
+                target_rate_hz=device_rate,
+            )
+        sd.play(pcm, samplerate=device_rate, device=self.device_index, blocking=True)
         self._bytes_written += pcm.nbytes
 
     @property
     def bytes_written(self) -> int:
         """累计写出字节数。"""
         return self._bytes_written
+
+    def _resolve_device_sample_rate(self) -> int:
+        if self._device_sample_rate_hz is not None:
+            return self._device_sample_rate_hz
+        info = sd.query_devices(self.device_index)
+        try:
+            rate = int(float(info["default_samplerate"]))
+        except (KeyError, TypeError, ValueError):
+            return self.sample_rate_hz
+        if rate <= 0:
+            return self.sample_rate_hz
+        self._device_sample_rate_hz = rate
+        return rate
+
+
+def _resample_pcm_to_rate(
+    pcm: Int16Array,
+    *,
+    source_rate_hz: int,
+    target_rate_hz: int,
+) -> Int16Array:
+    """对 mono 或 stereo int16 PCM 整体重采样到目标采样率。"""
+    samples = np.asarray(pcm, dtype=np.int16)
+    if samples.ndim == 1:
+        return resample_int16_mono(
+            samples,
+            source_rate_hz=source_rate_hz,
+            target_rate_hz=target_rate_hz,
+        )
+    channels = [
+        resample_int16_mono(
+            samples[:, channel],
+            source_rate_hz=source_rate_hz,
+            target_rate_hz=target_rate_hz,
+        )
+        for channel in range(samples.shape[1])
+    ]
+    return np.column_stack(channels).astype(np.int16)
 
 
 class BlackHoleWriter:

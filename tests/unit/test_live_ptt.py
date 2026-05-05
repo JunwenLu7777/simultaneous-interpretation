@@ -237,8 +237,19 @@ def test_streaming_blackhole_recorder_downmixes_stereo_input(monkeypatch) -> Non
     assert int(chunks[0][0]) == 200
 
 
+def _rms_only_speech_decider(frame: np.ndarray, *, vad: object, rms_threshold: float) -> bool:
+    """测试桩：只用 RMS 决定一帧是否为人声，避开真实 webrtcvad 行为。"""
+    del vad
+    samples = np.asarray(frame, dtype=np.int16).reshape(-1)
+    if samples.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+    return rms >= rms_threshold
+
+
 def test_streaming_microphone_recorder_segments_speech_after_tail_silence(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """连续监听应只输出有效人声段，并裁掉尾部静音。"""
+    monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
     recorder = StreamingMicrophoneRecorder(sample_rate_hz=16000)
     silence = np.zeros(480, dtype=np.int16)
     speech = np.ones(480, dtype=np.int16) * 1000
@@ -275,6 +286,7 @@ def test_streaming_microphone_recorder_segments_speech_after_tail_silence(monkey
 
 def test_streaming_microphone_recorder_discards_too_short_speech(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """短促噪声不足最短人声阈值时不得送入 Whisper。"""
+    monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
     recorder = StreamingMicrophoneRecorder(sample_rate_hz=16000)
     silence = np.zeros(480, dtype=np.int16)
     speech = np.ones(480, dtype=np.int16) * 1000
@@ -301,6 +313,96 @@ def test_streaming_microphone_recorder_discards_too_short_speech(monkeypatch) ->
     )
 
     assert segments == []
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "-",
+        "。",
+        "...",
+        "!?",
+        "*phone rings*",
+        "*PHONE RINGING*",
+        "(noise)",
+        "[Music]",
+        "[INAUDIBLE]",
+        "12345",
+        "[00:00:00]",
+    ],
+)
+def test_transcript_text_from_segments_blocks_hallucination(raw_text: str) -> None:
+    """单字符 / 纯标点 / 数字 / 已知音效占位都视为 Whisper 幻觉，不得送入 DeepSeek。"""
+    with pytest.raises(UserFacingError) as exc_info:
+        _transcript_text_from_segments([Segment(raw_text)])
+
+    assert exc_info.value.code == "ptt.hallucinated_transcript"
+    assert exc_info.value.what_happened.startswith("发生了什么")
+    assert exc_info.value.next_action.startswith("下一步如何做")
+
+
+def test_transcript_text_from_segments_keeps_two_chinese_chars() -> None:
+    """两字以上汉字视为有效输入。"""
+    assert _transcript_text_from_segments([Segment("好的")]) == "好的"
+
+
+def test_transcript_text_from_segments_keeps_short_english_words() -> None:
+    """`Hi` / `OK` 这类短英文回答必须保留，不能误判为幻觉。"""
+    assert _transcript_text_from_segments([Segment("Hi")]) == "Hi"
+    assert _transcript_text_from_segments([Segment("OK")]) == "OK"
+
+
+def test_transcript_text_from_segments_returns_empty_on_pure_whitespace() -> None:
+    """全空白由调用方统一抛 ptt.empty_transcript，不应在此处误升级为幻觉。"""
+    assert _transcript_text_from_segments([Segment("   ")]) == ""
+
+
+def test_is_speech_frame_rejects_high_energy_noise_when_vad_says_no() -> None:
+    """Teams 提示音 / 风扇这类高 RMS 但 VAD 不认可的输入必须被拒。"""
+
+    class FakeVad:
+        def accept(self, _samples: np.ndarray) -> object:
+            from teams_voice_interpreter.stt.vad import VadDecision
+
+            return VadDecision(is_speech=False, should_close_segment=False)
+
+    high_energy = np.ones(480, dtype=np.int16) * 5000
+    assert (
+        live_ptt._is_speech_frame(high_energy, vad=FakeVad(), rms_threshold=180)  # type: ignore[arg-type]
+        is False
+    )
+
+
+def test_is_speech_frame_accepts_when_vad_and_rms_both_pass() -> None:
+    """VAD 判定为人声且 RMS 高于一半阈值，应被识别为人声。"""
+
+    class FakeVad:
+        def accept(self, _samples: np.ndarray) -> object:
+            from teams_voice_interpreter.stt.vad import VadDecision
+
+            return VadDecision(is_speech=True, should_close_segment=False)
+
+    speech_like = np.ones(480, dtype=np.int16) * 1000
+    assert (
+        live_ptt._is_speech_frame(speech_like, vad=FakeVad(), rms_threshold=180)  # type: ignore[arg-type]
+        is True
+    )
+
+
+def test_is_speech_frame_rejects_low_energy_even_if_vad_says_speech() -> None:
+    """RMS 低于一半阈值，即便 VAD 误判为人声也必须被拒，避免远端噪声触发幻觉。"""
+
+    class FakeVad:
+        def accept(self, _samples: np.ndarray) -> object:
+            from teams_voice_interpreter.stt.vad import VadDecision
+
+            return VadDecision(is_speech=True, should_close_segment=False)
+
+    low_energy = np.ones(480, dtype=np.int16) * 30
+    assert (
+        live_ptt._is_speech_frame(low_energy, vad=FakeVad(), rms_threshold=180)  # type: ignore[arg-type]
+        is False
+    )
 
 
 def test_whisper_transcriber_forces_chinese_language_and_multi_segment() -> None:
