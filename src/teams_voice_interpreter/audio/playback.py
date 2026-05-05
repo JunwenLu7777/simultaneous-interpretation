@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
+import sounddevice as sd
 
 Int16Array = npt.NDArray[np.int16]
+
+
+class AudioSink(Protocol):
+    """音频写出目标协议。"""
+
+    def write(self, samples: Int16Array) -> None:
+        """写入一段 PCM16 样本。"""
+
+    @property
+    def bytes_written(self) -> int:
+        """累计写出字节数。"""
 
 
 @dataclass
@@ -26,10 +39,32 @@ class InMemoryAudioSink:
         return sum(item.nbytes for item in self.writes)
 
 
+@dataclass
+class SoundDeviceAudioSink:
+    """通过 sounddevice 写入真实 CoreAudio 设备。"""
+
+    device_index: int
+    sample_rate_hz: int = 16000
+    _bytes_written: int = 0
+
+    def write(self, samples: Int16Array) -> None:
+        """阻塞写入 PCM16 样本。"""
+        pcm = np.asarray(samples, dtype=np.int16)
+        if pcm.size == 0:
+            return
+        sd.play(pcm, samplerate=self.sample_rate_hz, device=self.device_index, blocking=True)
+        self._bytes_written += pcm.nbytes
+
+    @property
+    def bytes_written(self) -> int:
+        """累计写出字节数。"""
+        return self._bytes_written
+
+
 class BlackHoleWriter:
     """把 mono PCM 复制为双通道并写入 BlackHole。"""
 
-    def __init__(self, sink: InMemoryAudioSink | None = None) -> None:
+    def __init__(self, sink: AudioSink | None = None) -> None:
         self.sink = sink or InMemoryAudioSink()
 
     def write_mono(self, samples: Int16Array) -> Int16Array:
@@ -43,7 +78,7 @@ class BlackHoleWriter:
 class DefaultOutputWriter:
     """写入 Mac 默认输出设备的可测试封装。"""
 
-    def __init__(self, sink: InMemoryAudioSink | None = None) -> None:
+    def __init__(self, sink: AudioSink | None = None) -> None:
         self.sink = sink or InMemoryAudioSink()
 
     def write_mono(self, samples: Int16Array) -> Int16Array:

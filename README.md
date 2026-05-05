@@ -12,15 +12,35 @@ Whisper.cpp、DeepSeek streaming 与 Edge-TTS 组成低成本同传管线，并�
 ```bash
 uv sync --extra dev
 scripts/install-blackhole.sh
-export DEEPSEEK_API_KEY=sk-...
-tvi start
+cp config.example.toml config.toml
+$EDITOR config.toml
+tvi doctor --mode realtime --confirm-teams-route
+tvi serve
+tvi say "你好，我们开始会议。"
+tvi ptt --seconds 3 --target blackhole
+tvi listen --target default --direction uplink --chunks 3
+tvi duplex
 ```
 
 Web 控制台默认绑定 `http://127.0.0.1:8765`。
 
+`config.toml` 用于保存本机 DeepSeek API Key，已被 `.gitignore` 忽略；也可继续使用
+`DEEPSEEK_API_KEY` 环境变量，环境变量优先级更高。
+
+`tvi doctor --mode realtime` 是进入 Teams 前的硬门禁：设备、凭证、Teams 路由、
+Edge-TTS 解码和音频写出任一项未过，都会以非 0 退出。`tvi listen` 用于单向本地校准，
+`tvi duplex` 用于真实双向：默认麦克风中文上行到上行虚拟设备，Teams 扬声器英文从下行
+虚拟设备进入程序，再把中文译音写到默认输出。正式会议必须使用两路不同虚拟设备，避免回灌。
+
 ## 核心命令
 
 ```bash
+tvi doctor
+tvi serve
+tvi say "你好，我们开始会议。" --target blackhole
+tvi ptt --seconds 3 --target blackhole
+tvi listen --target default --direction uplink
+tvi duplex
 tvi start
 tvi pause
 tvi resume

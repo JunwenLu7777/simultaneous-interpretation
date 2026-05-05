@@ -16,8 +16,8 @@
 
 ## 3. 鉴权
 
-- 通过 HTTP header `Authorization: Bearer ${DEEPSEEK_API_KEY}`
-- API Key 仅从环境变量 `DEEPSEEK_API_KEY` 读取（FR-022），**不得**进入任何配置文件或日志
+- 通过 HTTP header `Authorization: Bearer <DeepSeek API Key>`
+- API Key 可从环境变量 `DEEPSEEK_API_KEY` 或本地忽略的 `config.toml` 读取（FR-022），环境变量优先；**不得**进入源码、仓库提交、崩溃报告或日志
 
 ## 4. 请求 schema
 

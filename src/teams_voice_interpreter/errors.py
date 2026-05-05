@@ -58,6 +58,23 @@ class AggregateDeviceMissingError(UserFacingError):
         )
 
 
+class AudioDeviceMissingError(UserFacingError):
+    """按名称查找 CoreAudio 设备失败。"""
+
+    def __init__(self, *, device_name: str, direction: str, min_channels: int) -> None:
+        super().__init__(
+            code="audio.device_missing",
+            what_happened=(
+                f"发生了什么：未找到名为 `{device_name}` 且至少包含 {min_channels} 个"
+                f"{direction}通道的音频设备。"
+            ),
+            next_action=(
+                "下一步如何做：请在「音频 MIDI 设置」确认该虚拟设备存在，"
+                "或在 config.toml 中更新对应的虚拟设备名称。"
+            ),
+        )
+
+
 class DeepSeekError(UserFacingError):
     """DeepSeek 翻译服务错误。"""
 

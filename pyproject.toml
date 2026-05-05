@@ -75,7 +75,7 @@ no_implicit_optional = true
 packages = ["teams_voice_interpreter"]
 
 [[tool.mypy.overrides]]
-module = ["sounddevice", "webrtcvad", "edge_tts", "pywhispercpp"]
+module = ["sounddevice", "webrtcvad", "edge_tts", "edge_tts.*", "pywhispercpp", "pywhispercpp.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

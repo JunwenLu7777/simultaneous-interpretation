@@ -53,28 +53,45 @@ sudo shutdown -r now
 
 ```bash
 source .venv/bin/activate
-tvi wizard            # 等价于 python -m teams_voice_interpreter wizard
+tvi wizard            # 等价于 tvi doctor；执行进入 Teams 前的阻断项检查
 ```
 
-向导会按步骤检查并引导：
+CLI 会输出当前机器的阻断项；以下步骤是需要逐项完成的配置清单：
 
 ### 步骤 (a) 验证 BlackHole 2ch 安装
 
 向导通过 `sounddevice.query_devices()` 确认 BlackHole 2ch 已注册为 CoreAudio 设备。失败时会给出可点击的安装指引。
 
-### 步骤 (b) 创建 Aggregate Device
+### 步骤 (b) 创建两路独立虚拟音频设备
 
-向导显示分步截图，引导你：
+真实双向会议不得只使用一个 `BlackHole 2ch`。需要两条互相隔离的虚拟音频路径：
+
+- 上行虚拟设备：程序把你的中文译成英文后写入这里，Teams 把它当作麦克风输入。
+- 下行虚拟设备：Teams 把远端英文扬声器输出写入这里，程序从这里捕获后翻成中文给你听。
+
+可用方式：
+
+1. 使用支持多路虚拟设备的音频路由工具，创建 `TVI Uplink` 与 `TVI Downlink` 两个设备。
+2. 或安装第二个 BlackHole 变体 / 另一套虚拟音频设备，确保系统里有两个不同的 CoreAudio 设备。
+
+然后在 `config.toml` 中填写真实设备名：
+
+```toml
+uplink_virtual_device_name = "TVI Uplink"
+downlink_virtual_device_name = "TVI Downlink"
+allow_shared_virtual_device = false
+```
+
+如果只是临时调试，仍可使用单个 `BlackHole 2ch`，但必须显式执行
+`tvi duplex --allow-shared-virtual-device`，正式会议不建议这样做。
+
+如果你仍要用「音频 MIDI 设置」做手工路由，操作原则是：
 
 1. 打开 `应用 → 实用工具 → 音频 MIDI 设置`
-2. 左下角点 `+` → 「创建多输出设备」（也可用 Aggregate Device，效果相同）
-3. 命名为 `Teams 同传聚合`
-4. 在右侧勾选：
-   - `BlackHole 2ch`
-   - 你的当前耳机（如 `MacBook Pro 扬声器` 或 `AirPods Pro`）
-5. **Master Device 选你的耳机**（保证时钟同步）
+2. 确认上行和下行是两个不同设备，不是同一个 `BlackHole 2ch`
+3. 不要把 Teams 扬声器直接设成你的耳机；耳机应保留为 macOS 默认输出，供程序播放中文译音
 
-向导通过 CoreAudio HAL 自动检测 Aggregate Device 是否含 BlackHole 2ch；通过则进入下一步。
+`doctor --mode realtime` 会检测上行输出设备和下行输入设备是否存在，并阻断同一设备双向复用。
 
 ### 步骤 (c) 配置 Microsoft Teams
 
@@ -82,8 +99,8 @@ tvi wizard            # 等价于 python -m teams_voice_interpreter wizard
 
 1. 打开 Microsoft Teams
 2. `Settings → Devices`
-3. **Microphone** 下拉选择 `BlackHole 2ch`
-4. **Speaker** 下拉选择 `Teams 同传聚合`
+3. **Microphone** 下拉选择上行虚拟设备，例如 `TVI Uplink`
+4. **Speaker** 下拉选择下行虚拟设备，例如 `TVI Downlink`
 5. 点 Teams 内置「Make a test call」验证
 
 向导通过本系统在 BlackHole 写入测试音 + 提示你在 Teams 测试通话中确认是否听到来回环验证。
@@ -94,14 +111,30 @@ tvi wizard            # 等价于 python -m teams_voice_interpreter wizard
 
 ### 步骤 (e) 配置 DeepSeek API Key
 
-向导提示你把 API Key 写入环境变量（推荐）：
+推荐把 API Key 写入本地 `config.toml`：
+
+```bash
+cp config.example.toml config.toml
+$EDITOR config.toml
+```
+
+把 `deepseek_api_key = "sk-..."` 改成你的真实 Key。仓库根目录的 `config.toml` 已被
+`.gitignore` 忽略；也可复制到用户级配置路径：
+
+```bash
+mkdir -p ~/.config/teams-voice-interpreter
+cp config.example.toml ~/.config/teams-voice-interpreter/config.toml
+$EDITOR ~/.config/teams-voice-interpreter/config.toml
+```
+
+如果你更希望继续用环境变量，也可以写入 shell：
 
 ```bash
 echo 'export DEEPSEEK_API_KEY="sk-xxxxx"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-或写到本地 `.env`（仅开发用，**不要 commit**）：
+环境变量优先级高于 `config.toml`。开发环境也支持 `.env`（仅开发用，**不要 commit**）：
 
 ```bash
 echo 'DEEPSEEK_API_KEY=sk-xxxxx' > .env
@@ -142,18 +175,43 @@ en = "Foxit"
 ### 方式 1：Web 控制台（推荐）
 
 ```bash
-tvi start
+tvi doctor --mode realtime --confirm-teams-route
+tvi serve
 ```
 
-CLI 输出：
+`doctor` 通过后会输出：
 
 ```text
-[10:30:00] 同传桥已启动 SessionId=0193bc12-...-7f21
-[10:30:00] Web 控制台 http://localhost:8765
-[10:30:00] 上行：用户麦 → BlackHole 2ch
-[10:30:00] 下行：BlackHole 2ch → 用户耳机（中文译音）
-按 Ctrl+C 停止；或在 Web 控制台点击「停止」按钮。
+已就绪：可以进入 Teams 测试通话。
+[OK] 上行虚拟输出设备: TVI Uplink (index=...)
+[OK] 下行虚拟输入设备: TVI Downlink (index=...)
 ```
+
+当前建议先用单向命令完成本机校准，再进入真实双向会议：
+
+```bash
+tvi say "你好，我们开始会议。" --target blackhole
+tvi ptt --seconds 3 --target blackhole
+tvi listen --target default --direction uplink --chunks 3
+```
+
+`tvi say` 会把输入文字翻译并播入上行虚拟设备；`tvi ptt` 会先录制默认麦克风、
+用 Whisper 做一次性识别，再复用同一条 DeepSeek HTTP streaming、Edge-TTS live、
+macOS `afconvert` 解码和 sounddevice 写出路径。Teams 麦克风选中上行虚拟设备
+后，远端应能听到英文译音。`tvi listen` 用于验证连续分段、ASR 准确率和 TTS 输出。
+
+本机校准通过后，另开一个终端执行真实双向监听：
+
+```bash
+tvi duplex
+```
+
+`tvi duplex` 同时启动两条真实管线：
+
+- 上行：默认麦克风中文 → Whisper zh → DeepSeek 中译英 → Edge-TTS 英文 → 上行虚拟设备
+- 下行：下行虚拟设备英文 → Whisper en → DeepSeek 英译中 → Edge-TTS 中文 → 默认输出
+
+如果上行输出和下行输入是同一个 CoreAudio 设备，CLI 默认拒绝启动，避免把本机译音重新送回识别链路。
 
 打开浏览器访问 [http://localhost:8765](http://localhost:8765)。Web 控制台显示：
 
@@ -167,7 +225,15 @@ CLI 输出：
 
 ### 方式 2：仅 CLI
 
+若 `tvi serve` 正在前台运行，请另开一个终端执行以下 CLI 控制命令。
+
 ```bash
+tvi doctor --mode realtime --confirm-teams-route
+tvi serve              # 启动本地 Web 控制台
+tvi say "你好，我们开始会议。" --target blackhole
+tvi ptt --seconds 3 --target blackhole
+tvi listen --target default --direction uplink --chunks 3
+tvi duplex             # 启动真实双向监听
 tvi start              # 启动
 tvi pause              # 暂停
 tvi resume             # 继续
@@ -180,7 +246,7 @@ tvi status             # 当前状态
 ## 5. 使用：进入 Teams 会议
 
 1. 在 Teams 中加入或发起会议
-2. 确认 Teams 设置中麦克风源仍是 `BlackHole 2ch`、扬声器源仍是 `Teams 同传聚合`
+2. 确认 Teams 设置中麦克风源仍是上行虚拟设备，扬声器源仍是下行虚拟设备
 3. 用中文自然发言；远端会议方应在 ≤ 800 ms 内开始听到流式英文译音
 4. 远端用英文发言；你应在 ≤ 800 ms 内开始听到流式中文译音
 
@@ -211,8 +277,8 @@ tvi status             # 当前状态
 
 检查：
 
-1. Teams 麦克风源是否仍是 `BlackHole 2ch`（Teams Settings → Devices）
-2. CLI 输出是否有"上行：用户麦 → BlackHole 2ch"成功提示
+1. Teams 麦克风源是否仍是上行虚拟设备（Teams Settings → Devices）
+2. CLI 输出是否有「上行输出设备」且设备名正确
 3. Web 控制台「DeepSeek 健康」是否绿
 4. 在 Web 控制台「上行（中 → 英）」区是否能看到识别原文 + 英文译文流式更新
 5. 用 Teams 内置「测试通话」反向播放，应能听到自己的译音
@@ -222,7 +288,7 @@ tvi status             # 当前状态
 检查：
 
 1. 系统默认输出是否仍是你的耳机（菜单栏 → 音频图标）
-2. **不**应是 `Teams 同传聚合`（那只是给 Teams 用的，不是默认输出）
+2. **不**应是下行虚拟设备（那只是给 Teams 扬声器用的，不是默认输出）
 3. Web 控制台「下行（英 → 中）」区是否有英文识别 + 中文译文流式更新
 4. 调高耳机音量
 
@@ -300,7 +366,7 @@ rm -rf ~/.cache/teams-voice-interpreter
 # 4)（可选）卸载 BlackHole 2ch
 brew uninstall blackhole-2ch
 
-# 5)（可选）删除「音频 MIDI 设置」中的 Teams 同传聚合设备
+# 5)（可选）删除「音频 MIDI 设置」中的 TVI Uplink / TVI Downlink 虚拟设备
 # 在「音频 MIDI 设置」中右键 → 删除
 
 # 6) 在 Teams 中把麦克风源切回 MacBook 内置麦克风

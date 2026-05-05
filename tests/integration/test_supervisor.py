@@ -10,12 +10,13 @@ def test_supervisor_recovery_scenarios() -> None:
     manager = SessionManager()
     manager.start()
     manager.pause()
-    manager.resume()
+    manager.start()
 
     context = {"session_id": str(manager.session.session_id), "glossary": ["DeepSeek"]}
     restored = manager.supervisor.respawn_preserving_context("whisper", context)
     events = manager.supervisor.emit_retry_then_failure("deepseek", AudioDirection.UPLINK)
 
+    assert manager.session.state.value == "active"
     assert restored == context
     assert [event.kind for event in events] == ["retrying", "failed"]
 

@@ -50,8 +50,11 @@ class SessionManager:
     )
 
     def start(self) -> Session:
-        """启动会话并获取单实例锁。"""
+        """启动会话；active 时幂等，paused 时按继续处理。"""
         if self.session.state is SessionState.ACTIVE:
+            return self.session
+        if self.session.state is SessionState.PAUSED:
+            self.session.resume()
             return self.session
         lock_path = Path(tempfile.gettempdir()) / "teams-voice-interpreter.lock"
         lock = InstanceLock(
@@ -110,7 +113,7 @@ class SessionManager:
             fixture_text=fixture_text,
         )
         final = transcripts[-1]
-        mt_client = DeepSeekStreamingClient()
+        mt_client = DeepSeekStreamingClient(_translate_for_simulated_pipeline)
         target_text = ""
         async for chunk in mt_client.stream_translate(final.text, direction=direction):
             if chunk.text:
@@ -174,3 +177,9 @@ def _result_to_payload(result: PipelineResult | None) -> dict[str, object] | Non
 
 
 DEFAULT_MANAGER = SessionManager()
+
+
+def _translate_for_simulated_pipeline(text: str, direction: AudioDirection) -> str:
+    if direction is AudioDirection.UPLINK:
+        return "Hello, let's start the meeting."
+    return "你好，我们开始会议。"

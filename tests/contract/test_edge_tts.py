@@ -1,6 +1,7 @@
 """Edge-TTS 契约测试。"""
 
 import pytest
+from edge_tts.exceptions import NoAudioReceived
 
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import EdgeTTSError
@@ -37,3 +38,53 @@ def test_voice_validation_and_ssml_sanitize() -> None:
     with pytest.raises(EdgeTTSError):
         client.validate_voice("missing")
     assert sanitize_text("<speak>hello</speak>") == "hello"
+
+
+@pytest.mark.asyncio
+async def test_live_stream_collects_edge_audio_chunks() -> None:
+    """live 模式必须把 edge_tts audio chunk 暴露为 TTS 事件。"""
+
+    class FakeCommunicate:
+        def __init__(self, text: str, voice: str, *, rate: str = "+0%") -> None:
+            self.text = text
+            self.voice = voice
+            self.rate = rate
+
+        async def stream(self):
+            yield {"type": "audio", "data": b"mp3"}
+
+    client = EdgeTTSClient(live=True, rate="+20%", communicate_factory=FakeCommunicate)
+
+    events = [
+        event async for event in client.stream_synthesize("hello", direction=AudioDirection.UPLINK)
+    ]
+
+    assert [event.kind for event in events] == ["first_byte", "completed"]
+    assert events[0].audio_chunk == b"mp3"
+
+
+@pytest.mark.asyncio
+async def test_live_stream_wraps_no_audio_received() -> None:
+    """edge_tts NoAudioReceived 必须转成两段式用户可见错误。"""
+
+    class FakeCommunicate:
+        def __init__(self, text: str, voice: str, *, rate: str = "+0%") -> None:
+            self.text = text
+            self.voice = voice
+            self.rate = rate
+
+        async def stream(self):
+            raise NoAudioReceived("No audio was received.")
+            yield {"type": "audio", "data": b"unreachable"}
+
+    client = EdgeTTSClient(live=True, communicate_factory=FakeCommunicate)
+
+    with pytest.raises(EdgeTTSError) as exc_info:
+        [
+            event
+            async for event in client.stream_synthesize("hello", direction=AudioDirection.UPLINK)
+        ]
+
+    assert exc_info.value.code == "tts.no_audio"
+    assert exc_info.value.what_happened.startswith("发生了什么")
+    assert exc_info.value.next_action.startswith("下一步如何做")

@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 
 from teams_voice_interpreter.data.audio_segment import AudioDirection
@@ -55,3 +56,31 @@ async def test_stream_translate_local_responder() -> None:
 
     assert chunks[-1].kind == "completed"
     assert chunks[-1].text == "uplink:你好"
+
+
+@pytest.mark.asyncio
+async def test_stream_translate_http_sse() -> None:
+    """真实 DeepSeek HTTP 分支必须按官方 SSE data 行解析增量译文。"""
+    payload = {"choices": [{"delta": {"content": "Hello"}}]}
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            text=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DeepSeekStreamingClient(api_key="sk-test", http_client=http_client)
+
+    chunks = [
+        chunk async for chunk in client.stream_translate("你好", direction=AudioDirection.UPLINK)
+    ]
+
+    await http_client.aclose()
+    assert seen["authorization"] == "Bearer sk-test"
+    assert seen["payload"]["stream"] is True
+    assert chunks[0].text == "Hello"

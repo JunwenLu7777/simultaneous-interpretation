@@ -320,38 +320,27 @@
 
 ### 决策
 
-- **配置文件**：`~/.config/teams-voice-interpreter/config.toml`
+- **配置文件**：仓库根目录本地 `config.toml`（已忽略）或 `~/.config/teams-voice-interpreter/config.toml`
   ```toml
-  [api]
-  deepseek_api_key_env = "DEEPSEEK_API_KEY"     # 优先从环境变量读取，避免 toml 落盘密钥
-  
-  [server]
-  port = 8765
-  
-  [models]
-  whisper = "small-q5_0"                         # tiny / small-q5_0 / medium-q5_0
-  metal = true
-  
-  [voices]
-  en = "en-US-AriaNeural"
-  zh = "zh-CN-XiaoxiaoNeural"
-  
-  [glossary]
-  path = "~/.config/teams-voice-interpreter/glossary.toml"
+  deepseek_api_key = "sk-..."
+  deepseek_api_key_env = "DEEPSEEK_API_KEY"     # 环境变量仍优先
+  deepseek_model = "deepseek-v4-flash"
+  web_port = 8765
+  model_name = "small-q5_1"
   ```
 - **加载**：`pydantic-settings` 自动从 toml + 环境变量 + `.env`（项目本地，仅开发用）合并；环境变量优先级最高
-- **密钥**：永远不写入 toml；用户在 `~/.zshrc` 中 `export DEEPSEEK_API_KEY=...` 或 ad-hoc `DEEPSEEK_API_KEY=... tvi start`
+- **密钥**：可写入本地忽略的 `config.toml` 或环境变量；**不得**提交到仓库、日志或崩溃报告
 
 ### 理由
 
-- 环境变量优先 + toml 引用 = 密钥永远不落盘
+- 环境变量优先 + 本地忽略 config = 兼顾易用性与仓库泄密防护
 - pydantic-settings 提供统一的类型校验
 
 ### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
-| 把密钥写入 toml | 违反 FR-022 |
+| 把密钥写入受 Git 跟踪的 toml | 泄密风险，不符合 FR-022 |
 | macOS Keychain | 跨账户复杂、CI 不友好；可在 v1.x 作为可选项 |
 | `dotenv` 仅本地 | 用户机器仍可走 toml + env，统一一套即可 |
 

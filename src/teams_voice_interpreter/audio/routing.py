@@ -8,7 +8,12 @@ from typing import Any
 
 import sounddevice as sd
 
-from teams_voice_interpreter.errors import AggregateDeviceMissingError, BlackHoleMissingError
+from teams_voice_interpreter.errors import (
+    AggregateDeviceMissingError,
+    AudioDeviceMissingError,
+    BlackHoleMissingError,
+    UserFacingError,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,28 @@ class AudioDeviceProbe:
                 return device
         raise BlackHoleMissingError()
 
+    def find_input_device_by_name(self, device_name: str, *, min_channels: int = 1) -> AudioDevice:
+        """按名称查找输入设备。"""
+        for device in self._devices():
+            if device.name == device_name and device.max_input_channels >= min_channels:
+                return device
+        raise AudioDeviceMissingError(
+            device_name=device_name,
+            direction="输入",
+            min_channels=min_channels,
+        )
+
+    def find_output_device_by_name(self, device_name: str, *, min_channels: int = 1) -> AudioDevice:
+        """按名称查找输出设备。"""
+        for device in self._devices():
+            if device.name == device_name and device.max_output_channels >= min_channels:
+                return device
+        raise AudioDeviceMissingError(
+            device_name=device_name,
+            direction="输出",
+            min_channels=min_channels,
+        )
+
     def find_aggregate_with_blackhole(self) -> AudioDevice:
         """查找包含 BlackHole 的聚合设备。"""
         self.find_blackhole_2ch()
@@ -52,11 +79,23 @@ class AudioDeviceProbe:
     def get_default_input(self) -> AudioDevice:
         """返回 sounddevice 默认输入设备。"""
         default_input = sd.default.device[0]
+        if int(default_input) < 0:
+            raise UserFacingError(
+                code="audio.default_input_missing",
+                what_happened="发生了什么：未设置 macOS 默认输入设备。",
+                next_action="下一步如何做：请在系统设置中选择可用麦克风，并授权终端访问麦克风。",
+            )
         return self._devices()[int(default_input)]
 
     def get_default_output(self) -> AudioDevice:
         """返回 sounddevice 默认输出设备。"""
         default_output = sd.default.device[1]
+        if int(default_output) < 0:
+            raise UserFacingError(
+                code="audio.default_output_missing",
+                what_happened="发生了什么：未设置 macOS 默认输出设备。",
+                next_action="下一步如何做：请在系统设置中选择可用耳机或扬声器。",
+            )
         return self._devices()[int(default_output)]
 
     def check_runtime_devices(self) -> dict[str, DeviceHealth]:

@@ -1,6 +1,6 @@
 [error]
 blackhole_missing = "发生了什么：未找到 BlackHole 2ch 虚拟音频设备。\n下一步如何做：请运行 `brew install blackhole-2ch`，重启 macOS 后再启动。"
 aggregate_missing = "发生了什么：未找到包含 BlackHole 2ch 的聚合设备。\n下一步如何做：请在「音频 MIDI 设置」中创建包含 BlackHole 与耳机的聚合设备。"
-deepseek_key_missing = "发生了什么：缺少 DeepSeek API Key 环境变量。\n下一步如何做：请设置 DEEPSEEK_API_KEY，或在 config.toml 中改用正确的 key_env_var。"
+deepseek_key_missing = "发生了什么：缺少 DeepSeek API Key。\n下一步如何做：请设置 DEEPSEEK_API_KEY，或在本地 config.toml 中填写 deepseek_api_key。"
 instance_already_running = "发生了什么：已有一个 Teams 同传会话正在运行。\n下一步如何做：请先停止现有会话，或打开状态面板查看当前 SessionId。"
 session_invalid_transition = "发生了什么：当前会话状态不允许执行该操作。\n下一步如何做：请刷新状态后再选择可用操作。"

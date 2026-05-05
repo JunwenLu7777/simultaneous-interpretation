@@ -29,6 +29,7 @@ build/
 # Local runtime and credentials
 .env
 .env.*
+config.toml
 .omc/state/
 .omc/sessions/
 .cache/teams-voice-interpreter/whisper-models/

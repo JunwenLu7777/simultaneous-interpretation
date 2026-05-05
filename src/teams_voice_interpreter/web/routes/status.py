@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 from teams_voice_interpreter.session.manager import DEFAULT_MANAGER
 
@@ -25,5 +26,6 @@ async def websocket_status(websocket: WebSocket) -> None:
         for _ in range(5):
             await websocket.send_json(DEFAULT_MANAGER.status_payload())
             await asyncio.sleep(0.2)
-    finally:
-        await websocket.close()
+    except WebSocketDisconnect:
+        return
+    await websocket.close()

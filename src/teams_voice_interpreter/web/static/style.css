@@ -24,6 +24,16 @@ button {
   background: #ffffff;
 }
 
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+button[aria-busy="true"] {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
 .panel {
   margin-top: 16px;
   padding: 16px;
@@ -33,5 +43,14 @@ button {
 
 #toast {
   margin-top: 16px;
+  min-height: 24px;
+  white-space: pre-line;
+}
+
+#toast[data-variant="info"] {
+  color: #1d4ed8;
+}
+
+#toast[data-variant="error"] {
   color: #991b1b;
 }
