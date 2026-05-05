@@ -1,5 +1,7 @@
 """Edge-TTS 契约测试。"""
 
+import asyncio
+
 import pytest
 from edge_tts.exceptions import NoAudioReceived
 
@@ -86,5 +88,68 @@ async def test_live_stream_wraps_no_audio_received() -> None:
         ]
 
     assert exc_info.value.code == "tts.no_audio"
+    assert exc_info.value.what_happened.startswith("发生了什么")
+    assert exc_info.value.next_action.startswith("下一步如何做")
+
+
+@pytest.mark.asyncio
+async def test_live_stream_times_out_waiting_for_first_audio_chunk() -> None:
+    """8 秒内没有首个 audio chunk 时必须用 `tts.first_byte_timeout` 早失败。"""
+
+    class FakeCommunicate:
+        def __init__(self, text: str, voice: str, *, rate: str = "+0%") -> None:
+            self.text = text
+            self.voice = voice
+            self.rate = rate
+
+        async def stream(self):
+            await asyncio.sleep(0.05)
+            yield {"type": "audio", "data": b"late"}
+
+    client = EdgeTTSClient(
+        live=True,
+        communicate_factory=FakeCommunicate,
+        first_byte_timeout_s=0.01,
+    )
+
+    with pytest.raises(EdgeTTSError) as exc_info:
+        [
+            event
+            async for event in client.stream_synthesize("hello", direction=AudioDirection.UPLINK)
+        ]
+
+    assert exc_info.value.code == "tts.first_byte_timeout"
+    assert exc_info.value.what_happened.startswith("发生了什么")
+    assert exc_info.value.next_action.startswith("下一步如何做")
+
+
+@pytest.mark.asyncio
+async def test_live_stream_times_out_when_synthesis_runs_too_long() -> None:
+    """合成总耗时超过 15 秒时必须用 `tts.synthesis_timeout` 丢弃该段。"""
+
+    class FakeCommunicate:
+        def __init__(self, text: str, voice: str, *, rate: str = "+0%") -> None:
+            self.text = text
+            self.voice = voice
+            self.rate = rate
+
+        async def stream(self):
+            yield {"type": "audio", "data": b"first"}
+            await asyncio.sleep(0.05)
+            yield {"type": "audio", "data": b"late"}
+
+    client = EdgeTTSClient(
+        live=True,
+        communicate_factory=FakeCommunicate,
+        synthesis_timeout_s=0.01,
+    )
+
+    with pytest.raises(EdgeTTSError) as exc_info:
+        [
+            event
+            async for event in client.stream_synthesize("hello", direction=AudioDirection.UPLINK)
+        ]
+
+    assert exc_info.value.code == "tts.synthesis_timeout"
     assert exc_info.value.what_happened.startswith("发生了什么")
     assert exc_info.value.next_action.startswith("下一步如何做")

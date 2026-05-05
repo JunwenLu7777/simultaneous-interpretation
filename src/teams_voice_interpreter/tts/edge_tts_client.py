@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import edge_tts
 from edge_tts.exceptions import NoAudioReceived
@@ -17,6 +18,8 @@ DEFAULT_VOICES = {
     AudioDirection.UPLINK: "en-US-AriaNeural",
     AudioDirection.DOWNLINK: "zh-CN-XiaoxiaoNeural",
 }
+FIRST_BYTE_TIMEOUT_S = 8.0
+SYNTHESIS_TIMEOUT_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -48,12 +51,16 @@ class EdgeTTSClient:
         live: bool = False,
         rate: str = "+0%",
         communicate_factory: type[CommunicateLike] | None = None,
+        first_byte_timeout_s: float = FIRST_BYTE_TIMEOUT_S,
+        synthesis_timeout_s: float = SYNTHESIS_TIMEOUT_S,
     ) -> None:
         self.voices = voices or {"en-US-AriaNeural", "zh-CN-XiaoxiaoNeural"}
         self.token_refresh_count = 0
         self.live = live
         self.rate = rate
         self.communicate_factory = communicate_factory or edge_tts.Communicate
+        self.first_byte_timeout_s = first_byte_timeout_s
+        self.synthesis_timeout_s = synthesis_timeout_s
 
     def validate_voice(self, voice: str) -> None:
         """校验音色是否可用。"""
@@ -92,8 +99,21 @@ class EdgeTTSClient:
     async def _stream_live(self, text: str, voice: str) -> AsyncIterator[TTSEvent]:
         first_audio = True
         communicate = self.communicate_factory(text, voice, rate=self.rate)
+        stream = cast(AsyncIterator[dict[str, Any]], communicate.stream().__aiter__())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        first_audio_deadline = started + self.first_byte_timeout_s
+        synthesis_deadline = started + self.synthesis_timeout_s
         try:
-            async for chunk in communicate.stream():
+            while True:
+                chunk = await self._next_stream_chunk(
+                    stream,
+                    first_audio=first_audio,
+                    first_audio_deadline=first_audio_deadline,
+                    synthesis_deadline=synthesis_deadline,
+                )
+                if chunk is None:
+                    break
                 if chunk.get("type") != "audio":
                     continue
                 audio = bytes(chunk.get("data", b""))
@@ -113,12 +133,32 @@ class EdgeTTSClient:
                 ),
             ) from error
         if first_audio:
-            raise EdgeTTSError(
-                code="tts.no_audio",
-                what_happened="发生了什么：Edge-TTS 未返回音频数据。",
-                next_action="下一步如何做：请检查网络是否能访问 speech.platform.bing.com 后重试。",
-            )
+            raise _no_audio_error()
         yield TTSEvent(kind="completed")
+
+    async def _next_stream_chunk(
+        self,
+        stream: AsyncIterator[dict[str, Any]],
+        *,
+        first_audio: bool,
+        first_audio_deadline: float,
+        synthesis_deadline: float,
+    ) -> dict[str, Any] | None:
+        timeout_s = _next_timeout_s(
+            first_audio=first_audio,
+            first_audio_deadline=first_audio_deadline,
+            synthesis_deadline=synthesis_deadline,
+        )
+        try:
+            return await asyncio.wait_for(anext(stream), timeout=timeout_s)
+        except StopAsyncIteration:
+            return None
+        except TimeoutError as error:
+            raise _timeout_error(
+                first_audio=first_audio,
+                first_audio_deadline=first_audio_deadline,
+                synthesis_deadline=synthesis_deadline,
+            ) from error
 
     def refresh_token_once(self) -> None:
         """模拟 401/403 后刷新 token。"""
@@ -135,3 +175,41 @@ class EdgeTTSClient:
 def sanitize_text(text: str) -> str:
     """去除简单 SSML / 标签注入。"""
     return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _next_timeout_s(
+    *,
+    first_audio: bool,
+    first_audio_deadline: float,
+    synthesis_deadline: float,
+) -> float:
+    loop = asyncio.get_running_loop()
+    deadline = min(first_audio_deadline, synthesis_deadline) if first_audio else synthesis_deadline
+    return max(0.0, deadline - loop.time())
+
+
+def _timeout_error(
+    *,
+    first_audio: bool,
+    first_audio_deadline: float,
+    synthesis_deadline: float,
+) -> EdgeTTSError:
+    if first_audio and first_audio_deadline <= synthesis_deadline:
+        return EdgeTTSError(
+            code="tts.first_byte_timeout",
+            what_happened="发生了什么：Edge-TTS 在 8 秒内没有返回首个音频片段。",
+            next_action="下一步如何做：该段已丢弃，请保持通话继续，下一段会自动重试。",
+        )
+    return EdgeTTSError(
+        code="tts.synthesis_timeout",
+        what_happened="发生了什么：Edge-TTS 合成超过 15 秒仍未完成。",
+        next_action="下一步如何做：该段已丢弃，请保持通话继续，下一段会自动重试。",
+    )
+
+
+def _no_audio_error() -> EdgeTTSError:
+    return EdgeTTSError(
+        code="tts.no_audio",
+        what_happened="发生了什么：Edge-TTS 未返回音频数据。",
+        next_action="下一步如何做：请检查网络是否能访问 speech.platform.bing.com 后重试。",
+    )

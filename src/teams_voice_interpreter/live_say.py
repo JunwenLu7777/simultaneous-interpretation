@@ -23,6 +23,11 @@ from teams_voice_interpreter.tts.audio_decode import decode_mp3_bytes_to_pcm16
 from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient, TTSEvent
 
 Int16Array = npt.NDArray[np.int16]
+_RETRIABLE_TTS_ERROR_CODES = {
+    "tts.no_audio",
+    "tts.first_byte_timeout",
+    "tts.synthesis_timeout",
+}
 
 
 @dataclass(frozen=True)
@@ -152,7 +157,7 @@ class LiveSayBridge:
                 ]
             except EdgeTTSError as error:
                 last_error = error
-                if error.code != "tts.no_audio" or attempt >= max_retries:
+                if error.code not in _RETRIABLE_TTS_ERROR_CODES or attempt >= max_retries:
                     break
                 await asyncio.sleep(0.3 * (attempt + 1))
         assert last_error is not None

@@ -70,12 +70,19 @@ class _FakeEdgeTTSClient:
             yield event
 
 
-def test_synthesize_with_retry_recovers_from_no_audio_on_short_text(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Edge-TTS 在短文本上偶发空音频，重试一次应当恢复，不能直接抛错丢段。"""
+@pytest.mark.parametrize(
+    "error_code",
+    ["tts.no_audio", "tts.first_byte_timeout", "tts.synthesis_timeout"],
+)
+def test_synthesize_with_retry_recovers_from_retryable_tts_errors(  # type: ignore[no-untyped-def]
+    monkeypatch,
+    error_code: str,
+) -> None:
+    """Edge-TTS 可恢复错误重试一次应当恢复，不能直接抛错丢段。"""
     success_chunks = [TTSEvent(kind="audio_chunk", audio_chunk=b"mp3-bytes")]
     outcomes: list[list[TTSEvent] | EdgeTTSError] = [
         EdgeTTSError(
-            code="tts.no_audio",
+            code=error_code,
             what_happened="发生了什么：Edge-TTS 未返回音频数据。",
             next_action="下一步如何做：请重试一次。",
         ),
