@@ -7,6 +7,7 @@ import json
 import queue
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -626,6 +627,7 @@ def _prepare_listen_segment(
                 text,
                 direction=direction,
                 target=target,
+                streaming=True,
             )
         )
     except UserFacingError as error:
@@ -660,21 +662,45 @@ def _listen_playback_worker(
                 return
             if suppress_downlink_on_playback and playback_gate is not None:
                 playback_gate.suppress_for(_prepared_audio_seconds(item.prepared) + 0.8)
-            result = bridge.say_bridge.play_prepared(item.prepared)
+            playback_started = time.perf_counter()
+            try:
+                result = asyncio.run(_play_prepared_for_listen(bridge, item.prepared))
+            except UserFacingError as error:
+                typer.echo(f"{_display_index(item.label, item.index)} {error}")
+                continue
             completed_at = time.perf_counter()
             typer.echo(
                 f"{_display_index(item.label, item.index)} "
                 f"已写入：{result.target_device_name} ({result.bytes_written} bytes)"
             )
-            _print_listen_latency(item, result=result, completed_at=completed_at)
+            _print_listen_latency(
+                item,
+                result=result,
+                playback_started=playback_started,
+                completed_at=completed_at,
+            )
         finally:
             playback_queue.task_done()
+
+
+async def _play_prepared_for_listen(
+    bridge: LivePushToTalkBridge,
+    prepared: PreparedSayResult,
+) -> SayResult:
+    play_streaming = cast(
+        Callable[[PreparedSayResult], Awaitable[SayResult]] | None,
+        getattr(bridge.say_bridge, "play_prepared_streaming", None),
+    )
+    if play_streaming is None:
+        return await asyncio.to_thread(bridge.say_bridge.play_prepared, prepared)
+    return await play_streaming(prepared)
 
 
 def _print_listen_latency(
     item: _PendingPlayback,
     *,
     result: SayResult,
+    playback_started: float,
     completed_at: float,
 ) -> None:
     if not item.show_latency:
@@ -684,6 +710,7 @@ def _print_listen_latency(
         f"耗时：ASR {item.transcribed_at - item.started:.2f}s / "
         f"MT {result.translation_latency_s:.2f}s / TTS {result.tts_latency_s:.2f}s / "
         f"解码 {result.decode_latency_s:.2f}s / 播放 {result.playback_latency_s:.2f}s / "
+        f"首字节 {playback_started + result.first_pcm_latency_s - item.transcribed_at:.2f}s / "
         f"总计 {completed_at - item.started:.2f}s"
     )
 
@@ -695,7 +722,9 @@ def _display_index(label: str, index: int) -> str:
 
 
 def _prepared_audio_seconds(prepared: PreparedSayResult) -> float:
-    return float(prepared.pcm.size) / 16000
+    if prepared.pcm.size > 0:
+        return float(prepared.pcm.size) / 16000
+    return min(10.0, max(1.0, len(prepared.target_text) / 8.0))
 
 
 def _live_bridge_for_direction(direction: AudioDirection) -> LivePushToTalkBridge:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 
 from teams_voice_interpreter.audio import playback as playback_mod
 from teams_voice_interpreter.audio.playback import (
     BlackHoleWriter,
     SoundDeviceAudioSink,
+    StreamingSoundDeviceAudioSink,
     _resample_pcm_to_rate,
 )
 
@@ -159,3 +162,103 @@ def test_resample_pcm_to_rate_keeps_stereo_layout() -> None:
     assert resampled.shape == (480, 2)
     assert int(resampled[0, 0]) == 100
     assert int(resampled[0, 1]) == 300
+
+
+def test_streaming_sound_device_sink_callback_pulls_fed_pcm(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """feed_pcm 后，OutputStream callback 必须能立即拉出重采样后的 PCM。"""
+    stream_factory = _install_fake_output_stream(monkeypatch, device_rate=48000)
+    sink = StreamingSoundDeviceAudioSink(device_index=4, sample_rate_hz=16000)
+    stream = stream_factory.stream
+
+    asyncio.run(sink.feed_pcm(np.ones(160, dtype=np.int16) * 1000))
+    outdata = np.zeros((480, 1), dtype=np.int16)
+    stream.callback(outdata, 480, None, None)
+
+    assert stream.started
+    assert outdata.shape == (480, 1)
+    assert np.any(outdata)
+    assert sink.bytes_written == outdata.nbytes
+    asyncio.run(sink.flush_and_close())
+
+
+def test_streaming_sound_device_sink_outputs_silence_when_queue_empty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """队列空时 callback 必须输出静音帧，不能抛 underrun 异常。"""
+    stream_factory = _install_fake_output_stream(monkeypatch, device_rate=16000)
+    sink = StreamingSoundDeviceAudioSink(device_index=2, sample_rate_hz=16000)
+    stream = stream_factory.stream
+
+    outdata = np.ones((64, 1), dtype=np.int16) * 1234
+    stream.callback(outdata, 64, None, None)
+
+    assert outdata.tolist() == [[0] for _ in range(64)]
+    asyncio.run(sink.flush_and_close())
+
+
+def test_streaming_sound_device_sink_flush_waits_until_queue_drains(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """flush_and_close 必须等 callback 消费完队列后才 stop/close stream。"""
+    stream_factory = _install_fake_output_stream(monkeypatch, device_rate=16000)
+    sink = StreamingSoundDeviceAudioSink(device_index=2, sample_rate_hz=16000)
+    stream = stream_factory.stream
+
+    async def scenario() -> None:
+        await sink.feed_pcm(np.ones(160, dtype=np.int16) * 500)
+        flush_task = asyncio.create_task(sink.flush_and_close())
+        await asyncio.sleep(0.01)
+        assert not flush_task.done()
+        assert not stream.stopped
+
+        outdata = np.zeros((160, 1), dtype=np.int16)
+        stream.callback(outdata, 160, None, None)
+        await asyncio.wait_for(flush_task, timeout=1)
+
+    asyncio.run(scenario())
+
+    assert stream.stopped
+    assert stream.closed
+
+
+class _FakeOutputStream:
+    """测试用 OutputStream，记录 callback 与生命周期。"""
+
+    def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        del args
+        self.callback = kwargs["callback"]
+        self.samplerate = kwargs["samplerate"]
+        self.device = kwargs["device"]
+        self.channels = kwargs["channels"]
+        self.dtype = kwargs["dtype"]
+        self.started = False
+        self.stopped = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeOutputStreamFactory:
+    """记录最近创建的 OutputStream。"""
+
+    def __init__(self) -> None:
+        self.stream: _FakeOutputStream | None = None
+
+    def __call__(self, *args, **kwargs) -> _FakeOutputStream:  # type: ignore[no-untyped-def]
+        stream = _FakeOutputStream(*args, **kwargs)
+        self.stream = stream
+        return stream
+
+
+def _install_fake_output_stream(monkeypatch, *, device_rate: int) -> _FakeOutputStreamFactory:  # type: ignore[no-untyped-def]
+    stream_factory = _FakeOutputStreamFactory()
+    monkeypatch.setattr(
+        playback_mod.sd,
+        "query_devices",
+        lambda device_index: {"default_samplerate": float(device_rate)},
+    )
+    monkeypatch.setattr(playback_mod.sd, "OutputStream", stream_factory)
+    return stream_factory

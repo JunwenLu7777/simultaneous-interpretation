@@ -2,6 +2,7 @@
 
 import os
 
+from teams_voice_interpreter import readiness as readiness_mod
 from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.errors import BlackHoleMissingError
 from teams_voice_interpreter.readiness import CheckStatus, ReadinessChecker
@@ -186,3 +187,37 @@ def test_readiness_phrase_mode_allows_short_phrase_path() -> None:
 
     assert report.is_ready
     assert report.by_key["live_pipeline"].title == "短句真实发声路径"
+
+
+def test_readiness_includes_pyav_decode_check() -> None:
+    """readiness 必须检查 PyAV 可导入且能解码最小 MP3。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+    ).run()
+
+    assert report.by_key["pyav"].status is CheckStatus.PASS
+    assert "PyAV" in report.by_key["pyav"].title
+
+
+def test_readiness_reports_pyav_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """PyAV 不可用时必须返回 pyav.unavailable 和安装建议。"""
+
+    def fail_decode() -> None:
+        raise RuntimeError("missing av")
+
+    monkeypatch.setattr(readiness_mod, "_decode_minimal_mp3_with_pyav", fail_decode)
+
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["pyav"].status is CheckStatus.FAIL
+    assert "pyav.unavailable" in report.by_key["pyav"].detail
+    assert "uv sync" in report.by_key["pyav"].next_action

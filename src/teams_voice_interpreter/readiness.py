@@ -7,6 +7,7 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from io import BytesIO
 from typing import Literal, Protocol
 
 import numpy as np
@@ -109,6 +110,7 @@ class ReadinessChecker:
                 self._deepseek_key_check(),
                 self._edge_tts_voice_check(),
                 self._afconvert_check(),
+                self._pyav_check(),
                 self._blackhole_write_dry_run_check(),
                 self._blackhole_read_dry_run_check(),
                 self._teams_route_check(),
@@ -260,6 +262,18 @@ class ReadinessChecker:
             )
         return self._pass("afconvert", "macOS 音频解码器", path)
 
+    def _pyav_check(self) -> ReadinessCheck:
+        try:
+            _decode_minimal_mp3_with_pyav()
+        except Exception as error:
+            return self._fail(
+                "pyav",
+                "PyAV 流式 MP3 解码器",
+                f"pyav.unavailable: {error}",
+                "下一步如何做：请运行 `uv sync --extra dev` 安装 PyAV 后重试。",
+            )
+        return self._pass("pyav", "PyAV 流式 MP3 解码器", "可导入并解码最小 MP3")
+
     def _blackhole_write_dry_run_check(self) -> ReadinessCheck:
         sink = InMemoryAudioSink()
         writer = BlackHoleWriter(sink=sink)
@@ -408,3 +422,27 @@ def _redact_secret(value: str) -> str:
     if len(value) < 2:
         return "***"
     return f"{value[:2]}***"
+
+
+def _decode_minimal_mp3_with_pyav() -> None:
+    import av
+
+    from teams_voice_interpreter.tts.audio_decode import _decode_mp3_buffer_to_pcm16
+
+    buffer = BytesIO()
+    with av.open(buffer, mode="w", format="mp3") as container:
+        stream = container.add_stream("mp3", rate=16000)
+        stream.layout = "mono"
+        frame = av.AudioFrame.from_ndarray(
+            np.zeros((1, 320), dtype=np.int16),
+            format="s16",
+            layout="mono",
+        )
+        frame.sample_rate = 16000
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    if _decode_mp3_buffer_to_pcm16(buffer.getvalue(), sample_rate_hz=16000).size == 0:
+        msg = "PyAV decoded zero samples"
+        raise RuntimeError(msg)

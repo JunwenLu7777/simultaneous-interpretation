@@ -133,7 +133,9 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
             *,
             direction: AudioDirection,
             target: str,
+            streaming: bool = False,
         ) -> PreparedSayResult:
+            del streaming
             captured.update({"text": text, "direction": direction, "target": target})
             return PreparedSayResult(
                 source_text=text,
@@ -254,7 +256,9 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
             *,
             direction: AudioDirection,
             target: str,
+            streaming: bool = False,
         ) -> PreparedSayResult:
+            del streaming
             prepared.append((text, direction, target))
             return PreparedSayResult(
                 source_text=text,

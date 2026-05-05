@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import numpy as np
 import pytest
 
 from teams_voice_interpreter import live_say
+from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import EdgeTTSError
-from teams_voice_interpreter.live_say import LiveSayBridge, _preview_text, _target_text_from_chunks
+from teams_voice_interpreter.live_say import (
+    LiveSayBridge,
+    PreparedSayResult,
+    _preview_text,
+    _target_text_from_chunks,
+)
 from teams_voice_interpreter.mt.deepseek_client import TranslationChunk
 from teams_voice_interpreter.tts.edge_tts_client import TTSEvent
 
@@ -170,3 +177,52 @@ def test_synthesize_with_retry_does_not_retry_on_other_errors(monkeypatch) -> No
 
     assert exc_info.value.code == "tts.voice_unknown"
     assert len(factory_calls) == 1
+
+
+def test_play_prepared_streaming_feeds_pcm_iterator_to_streaming_sink(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """流式播放路径必须逐块 feed PCM，并在结束后 flush_and_close。"""
+    sink = _FakeStreamingSink(device_index=1, sample_rate_hz=16000)
+    monkeypatch.setattr(live_say, "StreamingSoundDeviceAudioSink", lambda **_: sink)
+
+    async def pcm_iterator() -> AsyncIterator[np.ndarray]:
+        yield np.array([1, 2, 3], dtype=np.int16)
+        yield np.array([4, 5], dtype=np.int16)
+
+    prepared = PreparedSayResult(
+        source_text="你好",
+        target_text="Hello",
+        target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+        target="default",
+        translation_latency_s=0.1,
+        tts_latency_s=0.0,
+        decode_latency_s=0.0,
+        pcm=np.array([], dtype=np.int16),
+        pcm_iterator=pcm_iterator(),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    result = asyncio.run(bridge.play_prepared_streaming(prepared))
+
+    assert [item.tolist() for item in sink.writes] == [[1, 2, 3], [4, 5]]
+    assert sink.closed
+    assert result.bytes_written == 10
+    assert result.first_pcm_latency_s >= 0
+
+
+class _FakeStreamingSink:
+    """测试用流式 sink。"""
+
+    def __init__(self, *, device_index: int, sample_rate_hz: int) -> None:
+        del device_index, sample_rate_hz
+        self.writes: list[np.ndarray] = []
+        self.closed = False
+
+    async def feed_pcm(self, samples: np.ndarray) -> None:
+        self.writes.append(np.asarray(samples, dtype=np.int16).copy())
+
+    async def flush_and_close(self) -> None:
+        self.closed = True
+
+    @property
+    def bytes_written(self) -> int:
+        return sum(item.nbytes for item in self.writes)

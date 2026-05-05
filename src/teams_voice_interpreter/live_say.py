@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,14 +14,18 @@ from teams_voice_interpreter.audio.playback import (
     BlackHoleWriter,
     DefaultOutputWriter,
     SoundDeviceAudioSink,
+    StreamingSoundDeviceAudioSink,
 )
 from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.config import load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import EdgeTTSError, UserFacingError
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient, TranslationChunk
-from teams_voice_interpreter.tts.audio_decode import decode_mp3_bytes_to_pcm16
+from teams_voice_interpreter.tts.audio_decode import (
+    decode_mp3_bytes_to_pcm16,
+)
 from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient, TTSEvent
+from teams_voice_interpreter.tts.streaming import stream_pcm_chunks_with_retry
 
 Int16Array = npt.NDArray[np.int16]
 _RETRIABLE_TTS_ERROR_CODES = {
@@ -42,6 +47,7 @@ class SayResult:
     tts_latency_s: float = 0.0
     decode_latency_s: float = 0.0
     playback_latency_s: float = 0.0
+    first_pcm_latency_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -50,12 +56,13 @@ class PreparedSayResult:
 
     source_text: str
     target_text: str
-    pcm: Int16Array
     target_device: AudioDevice
     target: str
     translation_latency_s: float
     tts_latency_s: float
     decode_latency_s: float
+    pcm: Int16Array
+    pcm_iterator: AsyncIterator[Int16Array] | None = None
 
 
 class LiveSayBridge:
@@ -81,6 +88,7 @@ class LiveSayBridge:
         *,
         direction: AudioDirection,
         target: str,
+        streaming: bool = False,
     ) -> PreparedSayResult:
         """翻译并合成音频，但不阻塞播放。"""
         source_text = text.strip()
@@ -109,6 +117,22 @@ class LiveSayBridge:
                 what_happened="发生了什么：DeepSeek 没有返回可播出的译文。",
                 next_action="下一步如何做：请稍后重试，或换一句更短的文本。",
             )
+        if streaming:
+            return PreparedSayResult(
+                source_text=source_text,
+                target_text=target_text,
+                target_device=target_device,
+                target=target,
+                translation_latency_s=translated_at - translation_started,
+                tts_latency_s=0.0,
+                decode_latency_s=0.0,
+                pcm=np.array([], dtype=np.int16),
+                pcm_iterator=stream_pcm_chunks_with_retry(
+                    target_text=target_text,
+                    direction=direction,
+                    rate=settings.tts_rate,
+                ),
+            )
         tts_started = time.perf_counter()
         audio_events = await self._synthesize_with_retry(
             target_text=target_text,
@@ -122,12 +146,12 @@ class LiveSayBridge:
         return PreparedSayResult(
             source_text=source_text,
             target_text=target_text,
-            pcm=pcm,
             target_device=target_device,
             target=target,
             translation_latency_s=translated_at - translation_started,
             tts_latency_s=tts_completed_at - tts_started,
             decode_latency_s=decoded_at - tts_completed_at,
+            pcm=pcm,
         )
 
     async def _synthesize_with_retry(
@@ -201,6 +225,38 @@ class LiveSayBridge:
             tts_latency_s=prepared.tts_latency_s,
             decode_latency_s=prepared.decode_latency_s,
             playback_latency_s=played_at - playback_started,
+        )
+
+    async def play_prepared_streaming(self, prepared: PreparedSayResult) -> SayResult:
+        """把流式 PCM iterator 写入目标设备，保留同步 play_prepared 作为回退契约。"""
+        if prepared.pcm_iterator is None:
+            return await asyncio.to_thread(self.play_prepared, prepared)
+        playback_started = time.perf_counter()
+        first_pcm_at: float | None = None
+        sink = StreamingSoundDeviceAudioSink(
+            device_index=prepared.target_device.index,
+            sample_rate_hz=16000,
+        )
+        try:
+            async for pcm in prepared.pcm_iterator:
+                if pcm.size == 0:
+                    continue
+                await sink.feed_pcm(pcm)
+                if first_pcm_at is None:
+                    first_pcm_at = time.perf_counter()
+        finally:
+            await sink.flush_and_close()
+        played_at = time.perf_counter()
+        return SayResult(
+            source_text=prepared.source_text,
+            target_text=prepared.target_text,
+            bytes_written=sink.bytes_written,
+            target_device_name=prepared.target_device.name,
+            translation_latency_s=prepared.translation_latency_s,
+            tts_latency_s=prepared.tts_latency_s,
+            decode_latency_s=prepared.decode_latency_s,
+            playback_latency_s=played_at - playback_started,
+            first_pcm_latency_s=(0.0 if first_pcm_at is None else first_pcm_at - playback_started),
         )
 
     def _target_device(self, target: str) -> AudioDevice:

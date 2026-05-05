@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import queue
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -23,6 +25,19 @@ class AudioSink(Protocol):
     @property
     def bytes_written(self) -> int:
         """累计写出字节数。"""
+
+
+class OutputStreamLike(Protocol):
+    """sounddevice OutputStream 的最小生命周期协议。"""
+
+    def start(self) -> None:
+        """启动输出流。"""
+
+    def stop(self) -> None:
+        """停止输出流。"""
+
+    def close(self) -> None:
+        """关闭输出流。"""
 
 
 @dataclass
@@ -90,6 +105,113 @@ class SoundDeviceAudioSink:
         return rate
 
 
+@dataclass
+class StreamingSoundDeviceAudioSink:
+    """通过 sounddevice OutputStream 流式写入真实 CoreAudio 设备。"""
+
+    device_index: int
+    sample_rate_hz: int = 16000
+    queue_max_chunks: int = 16
+    _bytes_written: int = 0
+    _device_sample_rate_hz: int | None = None
+    _queue: queue.Queue[bytes] = field(init=False)
+    _stream: OutputStreamLike = field(init=False)
+    _pending: bytearray = field(default_factory=bytearray, init=False)
+    _pending_task_open: bool = False
+    _closed: bool = False
+
+    def __post_init__(self) -> None:
+        device_rate = self._resolve_device_sample_rate()
+        self._queue = queue.Queue(maxsize=self.queue_max_chunks)
+        self._stream = sd.OutputStream(
+            samplerate=device_rate,
+            device=self.device_index,
+            channels=1,
+            dtype="int16",
+            callback=self._output_callback,
+        )
+        self._stream.start()
+
+    async def feed_pcm(self, samples: Int16Array) -> None:
+        """异步喂入 16 kHz mono PCM16，必要时上采样到设备原生采样率。"""
+        pcm = np.asarray(samples, dtype=np.int16).reshape(-1)
+        if pcm.size == 0:
+            return
+        device_rate = self._resolve_device_sample_rate()
+        if device_rate != self.sample_rate_hz:
+            pcm = resample_int16_mono(
+                pcm,
+                source_rate_hz=self.sample_rate_hz,
+                target_rate_hz=device_rate,
+            )
+        data = pcm.astype(np.int16).tobytes()
+        self._bytes_written += len(data)
+        await asyncio.to_thread(self._queue.put, data)
+
+    async def flush_and_close(self) -> None:
+        """等待已喂入 PCM 被 callback 消费完，再关闭 OutputStream。"""
+        if self._closed:
+            return
+        await asyncio.to_thread(self._queue.join)
+        self._stream.stop()
+        self._stream.close()
+        self._closed = True
+
+    @property
+    def bytes_written(self) -> int:
+        """累计喂给 OutputStream 的有效音频字节数，不包含静音填充。"""
+        return self._bytes_written
+
+    def _output_callback(
+        self,
+        outdata: npt.NDArray[np.int16],
+        frames: int,
+        time_info: object,
+        status: object,
+    ) -> None:
+        del time_info, status
+        required_bytes = frames * np.dtype(np.int16).itemsize
+        payload = self._read_payload(required_bytes)
+        if len(payload) < required_bytes:
+            payload += bytes(required_bytes - len(payload))
+        outdata[:] = np.frombuffer(payload, dtype=np.int16).reshape(frames, 1)
+
+    def _read_payload(self, required_bytes: int) -> bytes:
+        payload = bytearray()
+        while len(payload) < required_bytes:
+            self._fill_pending_if_empty()
+            if not self._pending:
+                break
+            take = min(required_bytes - len(payload), len(self._pending))
+            payload.extend(self._pending[:take])
+            del self._pending[:take]
+            if not self._pending:
+                self._mark_pending_done()
+        return bytes(payload)
+
+    def _fill_pending_if_empty(self) -> None:
+        if self._pending:
+            return
+        try:
+            self._pending.extend(self._queue.get_nowait())
+        except queue.Empty:
+            return
+        self._pending_task_open = True
+
+    def _mark_pending_done(self) -> None:
+        if not self._pending_task_open:
+            return
+        self._queue.task_done()
+        self._pending_task_open = False
+
+    def _resolve_device_sample_rate(self) -> int:
+        if self._device_sample_rate_hz is not None:
+            return self._device_sample_rate_hz
+        rate = _device_sample_rate_or_default(self.device_index, self.sample_rate_hz)
+        self._device_sample_rate_hz = rate
+        return rate
+
+
 def _resample_pcm_to_rate(
     pcm: Int16Array,
     *,
@@ -113,6 +235,17 @@ def _resample_pcm_to_rate(
         for channel in range(samples.shape[1])
     ]
     return np.column_stack(channels).astype(np.int16)
+
+
+def _device_sample_rate_or_default(device_index: int, fallback_rate_hz: int) -> int:
+    info = sd.query_devices(device_index)
+    try:
+        rate = int(float(info["default_samplerate"]))
+    except (KeyError, TypeError, ValueError):
+        return fallback_rate_hz
+    if rate <= 0:
+        return fallback_rate_hz
+    return rate
 
 
 class BlackHoleWriter:
