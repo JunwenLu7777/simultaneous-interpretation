@@ -207,6 +207,52 @@ def test_play_prepared_streaming_feeds_pcm_iterator_to_streaming_sink(monkeypatc
     assert sink.closed
     assert result.bytes_written == 10
     assert result.first_pcm_latency_s >= 0
+    assert result.first_playback_write_latency_s == 0.07
+
+
+def test_play_prepared_streaming_truncates_realtime_audio(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """实时播放设置上限时必须截断 PCM，并关闭上游 iterator。"""
+    sink = _FakeStreamingSink(device_index=1, sample_rate_hz=16000)
+    monkeypatch.setattr(live_say, "StreamingSoundDeviceAudioSink", lambda **_: sink)
+    pcm_iterator = _ClosablePCMIterator(np.array([1, 2, 3, 4], dtype=np.int16))
+    prepared = PreparedSayResult(
+        source_text="你好",
+        target_text="Hello",
+        target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+        target="default",
+        translation_latency_s=0.1,
+        tts_latency_s=0.0,
+        decode_latency_s=0.0,
+        pcm=np.array([], dtype=np.int16),
+        pcm_iterator=pcm_iterator,
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    result = asyncio.run(bridge.play_prepared_streaming(prepared, max_playback_seconds=2 / 16000))
+
+    assert [item.tolist() for item in sink.writes] == [[1, 2]]
+    assert pcm_iterator.closed
+    assert result.playback_truncated
+    assert result.bytes_written == 4
+
+
+class _ClosablePCMIterator:
+    def __init__(self, samples: np.ndarray) -> None:
+        self._samples = samples
+        self._emitted = False
+        self.closed = False
+
+    def __aiter__(self) -> _ClosablePCMIterator:
+        return self
+
+    async def __anext__(self) -> np.ndarray:
+        if self._emitted:
+            raise StopAsyncIteration
+        self._emitted = True
+        return self._samples
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class _FakeStreamingSink:
@@ -226,3 +272,7 @@ class _FakeStreamingSink:
     @property
     def bytes_written(self) -> int:
         return sum(item.nbytes for item in self.writes)
+
+    @property
+    def first_payload_latency_s(self) -> float:
+        return 0.07

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -117,6 +118,8 @@ class StreamingSoundDeviceAudioSink:
     _queue: queue.Queue[bytes] = field(init=False)
     _stream: OutputStreamLike = field(init=False)
     _pending: bytearray = field(default_factory=bytearray, init=False)
+    _started_at: float = field(default=0.0, init=False)
+    _first_payload_at: float | None = field(default=None, init=False)
     _pending_task_open: bool = False
     _closed: bool = False
 
@@ -130,6 +133,7 @@ class StreamingSoundDeviceAudioSink:
             dtype="int16",
             callback=self._output_callback,
         )
+        self._started_at = time.perf_counter()
         self._stream.start()
 
     async def feed_pcm(self, samples: Int16Array) -> None:
@@ -162,6 +166,13 @@ class StreamingSoundDeviceAudioSink:
         """累计喂给 OutputStream 的有效音频字节数，不包含静音填充。"""
         return self._bytes_written
 
+    @property
+    def first_payload_latency_s(self) -> float | None:
+        """从 OutputStream 启动到 callback 首次取到有效 payload 的耗时。"""
+        if self._first_payload_at is None:
+            return None
+        return self._first_payload_at - self._started_at
+
     def _output_callback(
         self,
         outdata: npt.NDArray[np.int16],
@@ -172,6 +183,8 @@ class StreamingSoundDeviceAudioSink:
         del time_info, status
         required_bytes = frames * np.dtype(np.int16).itemsize
         payload = self._read_payload(required_bytes)
+        if payload and self._first_payload_at is None:
+            self._first_payload_at = time.perf_counter()
         if len(payload) < required_bytes:
             payload += bytes(required_bytes - len(payload))
         outdata[:] = np.frombuffer(payload, dtype=np.int16).reshape(frames, 1)

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -25,7 +26,7 @@ from teams_voice_interpreter.tts.audio_decode import (
     decode_mp3_bytes_to_pcm16,
 )
 from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient, TTSEvent
-from teams_voice_interpreter.tts.streaming import stream_pcm_chunks_with_retry
+from teams_voice_interpreter.tts.streaming import start_pcm_stream_with_retry
 
 Int16Array = npt.NDArray[np.int16]
 _RETRIABLE_TTS_ERROR_CODES = {
@@ -33,6 +34,8 @@ _RETRIABLE_TTS_ERROR_CODES = {
     "tts.first_byte_timeout",
     "tts.synthesis_timeout",
 }
+REALTIME_TTS_FIRST_BYTE_TIMEOUT_S = 3.0
+REALTIME_TTS_SYNTHESIS_TIMEOUT_S = 8.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class SayResult:
     decode_latency_s: float = 0.0
     playback_latency_s: float = 0.0
     first_pcm_latency_s: float = 0.0
+    first_playback_write_latency_s: float | None = None
+    playback_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,12 @@ class PreparedSayResult:
     decode_latency_s: float
     pcm: Int16Array
     pcm_iterator: AsyncIterator[Int16Array] | None = None
+
+
+@dataclass(frozen=True)
+class _StreamingPlaybackStats:
+    first_pcm_at: float | None
+    playback_truncated: bool
 
 
 class LiveSayBridge:
@@ -127,10 +138,13 @@ class LiveSayBridge:
                 tts_latency_s=0.0,
                 decode_latency_s=0.0,
                 pcm=np.array([], dtype=np.int16),
-                pcm_iterator=stream_pcm_chunks_with_retry(
+                pcm_iterator=start_pcm_stream_with_retry(
                     target_text=target_text,
                     direction=direction,
                     rate=settings.tts_rate,
+                    max_retries=0,
+                    first_byte_timeout_s=REALTIME_TTS_FIRST_BYTE_TIMEOUT_S,
+                    synthesis_timeout_s=REALTIME_TTS_SYNTHESIS_TIMEOUT_S,
                 ),
             )
         tts_started = time.perf_counter()
@@ -227,24 +241,30 @@ class LiveSayBridge:
             playback_latency_s=played_at - playback_started,
         )
 
-    async def play_prepared_streaming(self, prepared: PreparedSayResult) -> SayResult:
+    async def play_prepared_streaming(
+        self,
+        prepared: PreparedSayResult,
+        *,
+        max_playback_seconds: float | None = None,
+    ) -> SayResult:
         """把流式 PCM iterator 写入目标设备，保留同步 play_prepared 作为回退契约。"""
         if prepared.pcm_iterator is None:
             return await asyncio.to_thread(self.play_prepared, prepared)
         playback_started = time.perf_counter()
-        first_pcm_at: float | None = None
+        stats = _StreamingPlaybackStats(first_pcm_at=None, playback_truncated=False)
         sink = StreamingSoundDeviceAudioSink(
             device_index=prepared.target_device.index,
             sample_rate_hz=16000,
         )
         try:
-            async for pcm in prepared.pcm_iterator:
-                if pcm.size == 0:
-                    continue
-                await sink.feed_pcm(pcm)
-                if first_pcm_at is None:
-                    first_pcm_at = time.perf_counter()
+            stats = await _feed_streaming_pcm(
+                sink,
+                prepared.pcm_iterator,
+                max_samples=_max_playback_samples(max_playback_seconds),
+            )
         finally:
+            if stats.playback_truncated:
+                await _close_pcm_iterator(prepared.pcm_iterator)
             await sink.flush_and_close()
         played_at = time.perf_counter()
         return SayResult(
@@ -256,7 +276,9 @@ class LiveSayBridge:
             tts_latency_s=prepared.tts_latency_s,
             decode_latency_s=prepared.decode_latency_s,
             playback_latency_s=played_at - playback_started,
-            first_pcm_latency_s=(0.0 if first_pcm_at is None else first_pcm_at - playback_started),
+            first_pcm_latency_s=_first_pcm_latency_s(stats, playback_started=playback_started),
+            first_playback_write_latency_s=sink.first_payload_latency_s,
+            playback_truncated=stats.playback_truncated,
         )
 
     def _target_device(self, target: str) -> AudioDevice:
@@ -286,3 +308,76 @@ def _preview_text(text: str, *, max_length: int = 80) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[:max_length]}..."
+
+
+def _max_playback_samples(max_playback_seconds: float | None) -> int | None:
+    if max_playback_seconds is None:
+        return None
+    return max(0, int(max_playback_seconds * 16000))
+
+
+def _remaining_playback_samples(*, max_samples: int | None, fed_samples: int) -> int | None:
+    if max_samples is None:
+        return None
+    return max(0, max_samples - fed_samples)
+
+
+async def _feed_streaming_pcm(
+    sink: StreamingSoundDeviceAudioSink,
+    iterator: AsyncIterator[Int16Array],
+    *,
+    max_samples: int | None,
+) -> _StreamingPlaybackStats:
+    first_pcm_at: float | None = None
+    fed_samples = 0
+    async for pcm in iterator:
+        chunk, fed_samples, playback_truncated = _playback_chunk(
+            pcm,
+            max_samples=max_samples,
+            fed_samples=fed_samples,
+        )
+        if chunk is None:
+            return _StreamingPlaybackStats(first_pcm_at, playback_truncated=True)
+        if chunk.size == 0:
+            continue
+        await sink.feed_pcm(chunk)
+        first_pcm_at = first_pcm_at or time.perf_counter()
+        if playback_truncated:
+            return _StreamingPlaybackStats(first_pcm_at, playback_truncated=True)
+    return _StreamingPlaybackStats(first_pcm_at, playback_truncated=False)
+
+
+def _playback_chunk(
+    pcm: Int16Array,
+    *,
+    max_samples: int | None,
+    fed_samples: int,
+) -> tuple[Int16Array | None, int, bool]:
+    if pcm.size == 0:
+        return pcm, fed_samples, False
+    remaining_samples = _remaining_playback_samples(
+        max_samples=max_samples,
+        fed_samples=fed_samples,
+    )
+    if remaining_samples == 0:
+        return None, fed_samples, True
+    if remaining_samples is None or pcm.size <= remaining_samples:
+        return pcm, fed_samples + int(pcm.size), False
+    return pcm[:remaining_samples], fed_samples + remaining_samples, True
+
+
+def _first_pcm_latency_s(
+    stats: _StreamingPlaybackStats,
+    *,
+    playback_started: float,
+) -> float:
+    if stats.first_pcm_at is None:
+        return 0.0
+    return stats.first_pcm_at - playback_started
+
+
+async def _close_pcm_iterator(iterator: AsyncIterator[Int16Array]) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    await cast(Callable[[], Awaitable[None]], close)()

@@ -178,6 +178,8 @@ def test_streaming_sound_device_sink_callback_pulls_fed_pcm(monkeypatch) -> None
     assert outdata.shape == (480, 1)
     assert np.any(outdata)
     assert sink.bytes_written == outdata.nbytes
+    assert sink.first_payload_latency_s is not None
+    assert sink.first_payload_latency_s >= 0
     asyncio.run(sink.flush_and_close())
 
 
@@ -191,6 +193,7 @@ def test_streaming_sound_device_sink_outputs_silence_when_queue_empty(monkeypatc
     stream.callback(outdata, 64, None, None)
 
     assert outdata.tolist() == [[0] for _ in range(64)]
+    assert sink.first_payload_latency_s is None
     asyncio.run(sink.flush_and_close())
 
 

@@ -158,6 +158,8 @@ class EdgeTTSClient:
                 first_audio=first_audio,
                 first_audio_deadline=first_audio_deadline,
                 synthesis_deadline=synthesis_deadline,
+                first_byte_timeout_s=self.first_byte_timeout_s,
+                synthesis_timeout_s=self.synthesis_timeout_s,
             ) from error
 
     def refresh_token_once(self) -> None:
@@ -193,16 +195,20 @@ def _timeout_error(
     first_audio: bool,
     first_audio_deadline: float,
     synthesis_deadline: float,
+    first_byte_timeout_s: float,
+    synthesis_timeout_s: float,
 ) -> EdgeTTSError:
     if first_audio and first_audio_deadline <= synthesis_deadline:
         return EdgeTTSError(
             code="tts.first_byte_timeout",
-            what_happened="发生了什么：Edge-TTS 在 8 秒内没有返回首个音频片段。",
+            what_happened=(
+                f"发生了什么：Edge-TTS 在 {first_byte_timeout_s:g} 秒内没有返回首个音频片段。"
+            ),
             next_action="下一步如何做：该段已丢弃，请保持通话继续，下一段会自动重试。",
         )
     return EdgeTTSError(
         code="tts.synthesis_timeout",
-        what_happened="发生了什么：Edge-TTS 合成超过 15 秒仍未完成。",
+        what_happened=f"发生了什么：Edge-TTS 合成超过 {synthesis_timeout_s:g} 秒仍未完成。",
         next_action="下一步如何做：该段已丢弃，请保持通话继续，下一段会自动重试。",
     )
 

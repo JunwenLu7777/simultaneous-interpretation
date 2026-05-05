@@ -19,6 +19,14 @@ Runner = Callable[[list[str]], None]
 Int16Array = npt.NDArray[np.int16]
 
 
+def warm_up_pyav_decoder() -> None:
+    """预加载 PyAV 与 resampler，避免首段播放时才承担 import 成本。"""
+    import av  # noqa: F401
+    from av.audio.resampler import AudioResampler
+
+    AudioResampler(format="s16", layout="mono", rate=16000)
+
+
 def decode_mp3_bytes_to_pcm16(
     mp3_bytes: bytes,
     *,
