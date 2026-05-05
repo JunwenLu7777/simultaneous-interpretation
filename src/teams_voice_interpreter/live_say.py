@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -19,7 +20,7 @@ from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import EdgeTTSError, UserFacingError
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient, TranslationChunk
 from teams_voice_interpreter.tts.audio_decode import decode_mp3_bytes_to_pcm16
-from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient
+from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient, TTSEvent
 
 Int16Array = npt.NDArray[np.int16]
 
@@ -104,21 +105,11 @@ class LiveSayBridge:
                 next_action="下一步如何做：请稍后重试，或换一句更短的文本。",
             )
         tts_started = time.perf_counter()
-        try:
-            audio_events = [
-                event
-                async for event in EdgeTTSClient(
-                    live=True,
-                    rate=settings.tts_rate,
-                ).stream_synthesize(target_text, direction=direction)
-                if event.audio_chunk
-            ]
-        except EdgeTTSError as error:
-            raise EdgeTTSError(
-                code=error.code,
-                what_happened=f"{error.what_happened} 译文预览：{_preview_text(target_text)}",
-                next_action=error.next_action,
-            ) from error
+        audio_events = await self._synthesize_with_retry(
+            target_text=target_text,
+            direction=direction,
+            rate=settings.tts_rate,
+        )
         mp3_bytes = b"".join(event.audio_chunk for event in audio_events)
         tts_completed_at = time.perf_counter()
         pcm = decode_mp3_bytes_to_pcm16(mp3_bytes)
@@ -133,6 +124,46 @@ class LiveSayBridge:
             tts_latency_s=tts_completed_at - tts_started,
             decode_latency_s=decoded_at - tts_completed_at,
         )
+
+    async def _synthesize_with_retry(
+        self,
+        *,
+        target_text: str,
+        direction: AudioDirection,
+        rate: str,
+        max_retries: int = 1,
+    ) -> list[TTSEvent]:
+        """调 Edge-TTS；遇到 `tts.no_audio` 短文本/网络抖动时延迟一次重试。
+
+        Edge-TTS 对 ≤ 8 字短句和高频连续请求会偶发返回空音频，重试一次通常可恢复；
+        若仍失败则带上译文预览原样抛 `EdgeTTSError`，供调用方按 `_prepare_listen_segment`
+        的两段式打印丢弃该段，避免该段在 prepare 阶段直接撕掉整个 worker。
+        """
+        last_error: EdgeTTSError | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return [
+                    event
+                    async for event in EdgeTTSClient(
+                        live=True,
+                        rate=rate,
+                    ).stream_synthesize(target_text, direction=direction)
+                    if event.audio_chunk
+                ]
+            except EdgeTTSError as error:
+                last_error = error
+                if error.code != "tts.no_audio" or attempt >= max_retries:
+                    break
+                await asyncio.sleep(0.3 * (attempt + 1))
+        assert last_error is not None
+        raise EdgeTTSError(
+            code=last_error.code,
+            what_happened=(
+                f"{last_error.what_happened} 译文预览：{_preview_text(target_text)}"
+                f"（重试 {max_retries} 次后仍失败）"
+            ),
+            next_action=last_error.next_action,
+        ) from last_error
 
     def play_prepared(self, prepared: PreparedSayResult) -> SayResult:
         """把已合成 PCM 写入目标设备。"""

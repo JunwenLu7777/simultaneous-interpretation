@@ -363,6 +363,15 @@ def test_transcript_text_from_segments_keeps_short_english_words() -> None:
         "谢谢观看大家下次再见",
         "Subtitles by Bob",
         "Thanks for watching!",
+        "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+        "請不吝點讚 訂閱 轉發",
+        "如果您喜欢本视频请点赞订阅",
+        "记得点赞订阅支持一下",
+        "Please subscribe and like!",
+        "Like and subscribe for more videos",
+        "Don't forget to subscribe to my channel",
+        "感谢您的观看",
+        "明镜与点点栏目期待您的关注",
     ],
 )
 def test_transcript_text_from_segments_blocks_known_training_set_hallucination(
