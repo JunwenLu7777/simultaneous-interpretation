@@ -9,3 +9,5 @@
 !.agents/skills/**
 .omc/*
 .omx/*
+.omx/
+.serena/
