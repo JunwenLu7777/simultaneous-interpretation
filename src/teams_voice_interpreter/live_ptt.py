@@ -41,6 +41,25 @@ HALLUCINATION_MARKERS = frozenset(
         "*BEEP*",
         "*MUSIC*",
         "*NOISE*",
+        "音声",
+        "声音声",
+        "音聲",
+        "聲音聲",
+    }
+)
+HALLUCINATION_PREFIX_PATTERNS: frozenset[str] = frozenset(
+    {
+        "字幕",
+        "字幕组",
+        "字幕組",
+        "謝謝觀看",
+        "谢谢观看",
+        "感謝觀看",
+        "感谢观看",
+        "请订阅",
+        "請訂閱",
+        "Subtitles by",
+        "Thanks for watching",
     }
 )
 InputSource = Literal["default_input", "blackhole"]
@@ -436,22 +455,69 @@ def _transcript_text_from_segments(segments: Iterable[WhisperSegmentLike]) -> st
 
 
 def _looks_like_hallucination(text: str) -> bool:
-    """识别 Whisper 在静音/噪声段上的常见幻觉占位（音效标签、纯标点、过短输出）。"""
+    """识别 Whisper 在静音/噪声段上的常见幻觉占位。
+
+    覆盖五类：音效标签、纯标点、过短输出、量化解码 N-gram 重复、训练集片头/片尾。
+    """
     stripped = text.strip()
     if not stripped:
         return False
-    if stripped.upper() in HALLUCINATION_MARKERS:
+    if stripped in HALLUCINATION_MARKERS or stripped.upper() in HALLUCINATION_MARKERS:
         return True
     bare = stripped.strip("()[]<>*\"' ").strip()
     if not bare:
         return True
-    if bare.upper() in HALLUCINATION_MARKERS:
+    if bare in HALLUCINATION_MARKERS or bare.upper() in HALLUCINATION_MARKERS:
         return True
     if len(bare) <= 1:
         return True
     has_letter = any(c.isalpha() for c in bare)
     has_chinese = any("一" <= c <= "鿿" for c in bare)
-    return not has_letter and not has_chinese
+    if not has_letter and not has_chinese:
+        return True
+    if _starts_with_known_hallucination_prefix(bare):
+        return True
+    if _has_runaway_repeats(bare):
+        return True
+    return False
+
+
+def _starts_with_known_hallucination_prefix(text: str) -> bool:
+    """匹配 Whisper 训练集里高频出现的字幕 / 片尾 / 订阅提示前缀。"""
+    lowered = text.lower()
+    for prefix in HALLUCINATION_PREFIX_PATTERNS:
+        if text.startswith(prefix) or lowered.startswith(prefix.lower()):
+            return True
+    return False
+
+
+def _has_runaway_repeats(text: str) -> bool:
+    """检测 Whisper.cpp 在量化模型上常见的解码重复模式。
+
+    两条规则任一命中即视为幻觉：
+    1. 长度 ≥ 2 的子串在文本中**连续重复 ≥ 3 次**（例：直接直接直接、性能。性能。性能。）。
+    2. 中文字符 ≥ 4 个时，唯一中文字符占比 < 50%（例：性格的性格的性格 / 嗯嗯嗯嗯）。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    for unit_length in range(2, len(stripped) // 3 + 1):
+        repeat_window = unit_length * 3
+        for start in range(len(stripped) - repeat_window + 1):
+            unit = stripped[start : start + unit_length]
+            if not unit.strip():
+                continue
+            if stripped[start : start + repeat_window] == unit * 3:
+                return True
+
+    chinese_chars = [c for c in stripped if "一" <= c <= "鿿"]
+    if len(chinese_chars) >= 5:
+        unique_ratio = len(set(chinese_chars)) / len(chinese_chars)
+        if unique_ratio < 0.5:
+            return True
+
+    return False
 
 
 def _device_default_sample_rate_hz(

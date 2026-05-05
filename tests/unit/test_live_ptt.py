@@ -352,6 +352,64 @@ def test_transcript_text_from_segments_keeps_short_english_words() -> None:
     assert _transcript_text_from_segments([Segment("OK")]) == "OK"
 
 
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "音声",
+        "声音声",
+        "字幕:BiC, 李宗盛",
+        "字幕组提供",
+        "謝謝觀看",
+        "谢谢观看大家下次再见",
+        "Subtitles by Bob",
+        "Thanks for watching!",
+    ],
+)
+def test_transcript_text_from_segments_blocks_known_training_set_hallucination(
+    raw_text: str,
+) -> None:
+    """Whisper 在训练集片头/片尾上的常见幻觉必须被识别拦截，不送 DeepSeek。"""
+    with pytest.raises(UserFacingError) as exc_info:
+        _transcript_text_from_segments([Segment(raw_text)])
+
+    assert exc_info.value.code == "ptt.hallucinated_transcript"
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "直接直接直接直接直接直接接受你的语言",
+        "性能。性能。性能。",
+        "性格的性格的性格",
+        "嗯嗯嗯嗯嗯嗯",
+        "好的好的好的好的好的好的",
+        "no no no no no",
+        "the the the cat",
+    ],
+)
+def test_transcript_text_from_segments_blocks_runaway_repeats(raw_text: str) -> None:
+    """量化 Whisper 在 chunk 边界吐出的 N-gram 重复必须被拦截。"""
+    with pytest.raises(UserFacingError) as exc_info:
+        _transcript_text_from_segments([Segment(raw_text)])
+
+    assert exc_info.value.code == "ptt.hallucinated_transcript"
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "喂喂喂喂",  # 用户实际呼叫"喂喂喂喂"必须保留
+        "嗯嗯嗯嗯",  # 4 个嗯属于真实填充语，长度尚未触发 ratio 规则
+        "你好你好",
+        "我们今天开始第一次测试",
+        "Hello, can you hear me?",
+    ],
+)
+def test_transcript_text_from_segments_keeps_legitimate_short_emphasis(raw_text: str) -> None:
+    """真实用户的短重复 / 强调 / 正常对话不能被新过滤误伤。"""
+    assert _transcript_text_from_segments([Segment(raw_text)]) == raw_text
+
+
 def test_transcript_text_from_segments_returns_empty_on_pure_whitespace() -> None:
     """全空白由调用方统一抛 ptt.empty_transcript，不应在此处误升级为幻觉。"""
     assert _transcript_text_from_segments([Segment("   ")]) == ""
