@@ -21,7 +21,7 @@ from teams_voice_interpreter.audio.playback import (
 from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.config import load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
-from teams_voice_interpreter.errors import EdgeTTSError, UserFacingError
+from teams_voice_interpreter.errors import DeepSeekError, EdgeTTSError, UserFacingError
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient, TranslationChunk
 from teams_voice_interpreter.tts.audio_decode import (
     decode_mp3_bytes_to_pcm16,
@@ -37,6 +37,7 @@ _RETRIABLE_TTS_ERROR_CODES = {
 }
 REALTIME_TTS_FIRST_BYTE_TIMEOUT_S = 3.0
 REALTIME_TTS_SYNTHESIS_TIMEOUT_S = 8.0
+DEEPSEEK_STREAM_BUDGET_S = 8.0
 
 
 @dataclass(frozen=True)
@@ -126,16 +127,36 @@ class LiveSayBridge:
         translation_started = time.perf_counter()
         chunks: list[TranslationChunk] = []
         mt_first_token_at: float | None = None
-        async for chunk in DeepSeekStreamingClient(
-            api_key=settings.resolved_deepseek_api_key(),
-            model=settings.deepseek_model,
-            http_client=self._resolve_deepseek_http_client(),
-        ).stream_translate(source_text, direction=direction):
-            if not chunk.text:
-                continue
-            if mt_first_token_at is None:
-                mt_first_token_at = time.perf_counter()
-            chunks.append(chunk)
+
+        async def _collect_translation() -> None:
+            nonlocal mt_first_token_at
+            async for chunk in DeepSeekStreamingClient(
+                api_key=settings.resolved_deepseek_api_key(),
+                model=settings.deepseek_model,
+                http_client=self._resolve_deepseek_http_client(),
+            ).stream_translate(source_text, direction=direction):
+                if not chunk.text:
+                    continue
+                if mt_first_token_at is None:
+                    mt_first_token_at = time.perf_counter()
+                chunks.append(chunk)
+
+        try:
+            await asyncio.wait_for(
+                _collect_translation(), timeout=DEEPSEEK_STREAM_BUDGET_S
+            )
+        except TimeoutError as error:
+            raise DeepSeekError(
+                code="mt.stream_budget_exceeded",
+                what_happened=(
+                    f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内未完成翻译；"
+                    "服务端 / 网络抖动，丢弃该段避免阻塞后续。"
+                ),
+                next_action=(
+                    "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
+                    "若反复触发，请检查网络或换 DeepSeek 接入点。"
+                ),
+            ) from error
         translated_at = time.perf_counter()
         mt_first_token_latency_s = (
             mt_first_token_at - translation_started if mt_first_token_at is not None else 0.0

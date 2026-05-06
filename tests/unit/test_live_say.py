@@ -233,6 +233,55 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
     assert captured["max_retries"] == 1
 
 
+def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """DeepSeek 服务端长时间无响应必须按 stream budget 主动放弃，避免拖死管线。"""
+    monkeypatch.setattr(live_say, "DEEPSEEK_STREAM_BUDGET_S", 0.1)
+
+    class _StuckDeepSeek:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction
+            await asyncio.sleep(10)  # 模拟 DeepSeek 卡死
+            if False:  # pragma: no cover - 永远到不了
+                yield TranslationChunk(kind="delta", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _StuckDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    with pytest.raises(live_say.DeepSeekError) as exc:
+        asyncio.run(
+            bridge.prepare(
+                "你好",
+                direction=AudioDirection.UPLINK,
+                target="default",
+                streaming=True,
+            )
+        )
+
+    assert exc.value.code == "mt.stream_budget_exceeded"
+    assert "DeepSeek" in exc.value.what_happened
+    assert "丢弃" in exc.value.next_action
+
+
 def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """多次 prepare 必须复用同一个 httpx.AsyncClient，省掉每次 DeepSeek 调用的 TLS 握手。"""
     captured_http_clients: list[object] = []
