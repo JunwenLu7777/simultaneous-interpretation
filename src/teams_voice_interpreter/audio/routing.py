@@ -85,7 +85,15 @@ class AudioDeviceProbe:
                 what_happened="发生了什么：未设置 macOS 默认输入设备。",
                 next_action="下一步如何做：请在系统设置中选择可用麦克风，并授权终端访问麦克风。",
             )
-        return self._devices()[int(default_input)]
+        devices = self._devices()
+        default_index = int(default_input)
+        if default_index >= len(devices):
+            raise UserFacingError(
+                code="audio.default_input_stale",
+                what_happened=f"发生了什么：macOS 默认输入设备索引 {default_index} 已不存在。",
+                next_action="下一步如何做：请在系统设置中重新选择可用麦克风。",
+            )
+        return devices[default_index]
 
     def get_default_output(self) -> AudioDevice:
         """返回 sounddevice 默认输出设备。"""
@@ -96,7 +104,23 @@ class AudioDeviceProbe:
                 what_happened="发生了什么：未设置 macOS 默认输出设备。",
                 next_action="下一步如何做：请在系统设置中选择可用耳机或扬声器。",
             )
-        return self._devices()[int(default_output)]
+        devices = self._devices()
+        default_index = int(default_output)
+        if default_index >= len(devices):
+            raise UserFacingError(
+                code="audio.default_output_stale",
+                what_happened=f"发生了什么：macOS 默认输出设备索引 {default_index} 已不存在。",
+                next_action="下一步如何做：请在系统设置中重新选择可用耳机或扬声器。",
+            )
+        return devices[default_index]
+
+    def input_devices(self) -> list[AudioDevice]:
+        """返回所有带输入通道的 CoreAudio 设备。"""
+        return [device for device in self._devices() if device.max_input_channels > 0]
+
+    def output_devices(self) -> list[AudioDevice]:
+        """返回所有带输出通道的 CoreAudio 设备。"""
+        return [device for device in self._devices() if device.max_output_channels > 0]
 
     def check_runtime_devices(self) -> dict[str, DeviceHealth]:
         """运行期检查 BlackHole 与聚合设备是否仍存在。"""

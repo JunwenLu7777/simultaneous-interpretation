@@ -30,12 +30,48 @@ class TranscriptSegment(BaseModel):
     text: str
     confidence: float = Field(ge=0.0, le=1.0)
     provider: Literal["whisper.cpp"] = "whisper.cpp"
-    provider_model: str = "ggml-small-q5_0"
+    provider_model: str = "small-q5_1"
 
     @model_validator(mode="after")
     def validate_final_segment(self) -> TranscriptSegment:
         if self.kind is TranscriptKind.FINAL and (self.ended_at is None or not self.text.strip()):
             msg = "final transcript requires ended_at and non-empty text"
+            raise ValueError(msg)
+        return self
+
+
+class StableTranscriptChunk(BaseModel):
+    """LocalAgreement 输出的稳定增量；`text` 是累计全文，`delta_text` 是本次新增。"""
+
+    segment_id: UUID
+    direction: AudioDirection
+    kind: TranscriptKind
+    started_at: datetime
+    ended_at: datetime | None = None
+    text: str
+    delta_text: str = ""
+    confidence: float = Field(ge=0.0, le=1.0)
+    revision: bool = False
+    provider: Literal["whisper.cpp"] = "whisper.cpp"
+    provider_model: str = "small-q5_1"
+
+    @model_validator(mode="after")
+    def validate_stable_chunk(self) -> StableTranscriptChunk:
+        if not self.text.strip():
+            msg = "stable transcript chunk requires non-empty cumulative text"
+            raise ValueError(msg)
+        if self.kind is TranscriptKind.PARTIAL:
+            if not self.delta_text.strip():
+                msg = "partial stable transcript chunk requires non-empty delta_text"
+                raise ValueError(msg)
+            if self.revision:
+                msg = "partial stable transcript chunk cannot be a revision"
+                raise ValueError(msg)
+        if self.kind is TranscriptKind.FINAL and self.ended_at is None:
+            msg = "final stable transcript chunk requires ended_at"
+            raise ValueError(msg)
+        if self.revision and self.kind is not TranscriptKind.FINAL:
+            msg = "only final stable transcript chunk can be a revision"
             raise ValueError(msg)
         return self
 

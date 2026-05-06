@@ -190,9 +190,9 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
             del args, kwargs
 
         async def stream_translate(
-            self, text: str, *, direction: AudioDirection
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
-            del text, direction
+            del text, direction, context_text
             yield TranslationChunk(kind="delta", text="Hello")
             yield TranslationChunk(kind="completed", text="")
 
@@ -244,9 +244,9 @@ def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: 
             del args, kwargs
 
         async def stream_translate(
-            self, text: str, *, direction: AudioDirection
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
-            del text, direction
+            del text, direction, context_text
             await asyncio.sleep(10)  # 模拟 DeepSeek 卡死
             if False:  # pragma: no cover - 永远到不了
                 yield TranslationChunk(kind="delta", text="")
@@ -292,9 +292,9 @@ def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  
             captured_http_clients.append(http_client)
 
         async def stream_translate(
-            self, text: str, *, direction: AudioDirection
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
-            del text, direction
+            del text, direction, context_text
             yield TranslationChunk(kind="delta", text="Hello")
             yield TranslationChunk(kind="completed", text="")
 

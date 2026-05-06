@@ -55,12 +55,9 @@ class SileroOnnxVad:
         if not model_path.exists():
             raise UserFacingError(
                 code="vad.silero_model_missing",
-                what_happened=(
-                    f"发生了什么：未找到 Silero VAD 模型文件 `{model_path}`。"
-                ),
+                what_happened=(f"发生了什么：未找到 Silero VAD 模型文件 `{model_path}`。"),
                 next_action=(
-                    "下一步如何做：请运行 `bash scripts/install-silero-vad.sh` "
-                    "下载并校验模型。"
+                    "下一步如何做：请运行 `bash scripts/install-silero-vad.sh` 下载并校验模型。"
                 ),
             )
         self._threshold = threshold
@@ -105,9 +102,7 @@ def _default_session_factory(model_path: Path) -> _OnnxSessionProtocol:
     if _ort is None:
         raise UserFacingError(
             code="vad.onnxruntime_unavailable",
-            what_happened=(
-                "发生了什么：未能 import onnxruntime；Silero VAD 需要它做 ONNX 推理。"
-            ),
+            what_happened=("发生了什么：未能 import onnxruntime；Silero VAD 需要它做 ONNX 推理。"),
             next_action="下一步如何做：请运行 `uv sync --extra dev` 重新安装依赖。",
         )
     return cast(

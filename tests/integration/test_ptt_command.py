@@ -7,8 +7,29 @@ from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.cli import app as cli_app
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.live_say import PreparedSayResult, SayResult
+from teams_voice_interpreter.stt.whisper_streaming import OnlineASRProcessor, WhisperStreamingConfig
 
 runner = CliRunner()
+
+
+def _rms_only_speech_decider(frame: np.ndarray, *, vad: object, rms_threshold: float) -> bool:
+    """测试桩：只用 RMS 决定一帧是否为人声。"""
+    del vad
+    samples = np.asarray(frame, dtype=np.int16).reshape(-1)
+    if samples.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+    return rms >= rms_threshold
+
+
+def _speech_frames(count: int, *, amplitude: int = 1000):
+    for _ in range(count):
+        yield np.ones(480, dtype=np.int16) * amplitude
+
+
+def _silence_frames(count: int):
+    for _ in range(count):
+        yield np.zeros(480, dtype=np.int16)
 
 
 def test_ptt_command_invokes_push_to_talk_bridge(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -136,8 +157,9 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
             direction: AudioDirection,
             target: str,
             streaming: bool = False,
+            context_text: str = "",
         ) -> PreparedSayResult:
-            del streaming
+            del streaming, context_text
             captured.update({"text": text, "direction": direction, "target": target})
             return PreparedSayResult(
                 source_text=text,
@@ -210,6 +232,402 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
     assert "How are you? I am 30. Do you love me?" in result.output
 
 
+def test_listen_command_online_asr_prepares_stable_partial(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """显式开启 early-prepare 后，online-asr 才能在 VAD final 前准备稳定 partial。"""
+    prepared_sources: list[str] = []
+    prepare_contexts: list[str] = []
+    scripted_texts = iter(
+        [
+            "我们今天讨论现金流预测",
+            "我们今天讨论现金流预测方案",
+            "我们今天讨论现金流预测方案和预算",
+        ]
+    )
+
+    class FakeStreamRecorder:
+        sample_rate_hz = 16000
+
+        def chunks(self, *, chunk_seconds: float, max_chunks: int | None = None):
+            del chunk_seconds, max_chunks
+            for _ in range(20):
+                yield np.ones(480, dtype=np.int16) * 1000
+            yield np.zeros(480, dtype=np.int16)
+
+    class FakeTranscriber:
+        def transcribe(self, samples: object) -> str:
+            del samples
+            return next(scripted_texts)
+
+    class FakeSayBridge:
+        async def prepare(
+            self,
+            text: str,
+            *,
+            direction: AudioDirection,
+            target: str,
+            streaming: bool = False,
+            context_text: str = "",
+        ) -> PreparedSayResult:
+            assert direction is AudioDirection.UPLINK
+            assert target == "default"
+            assert streaming
+            prepared_sources.append(text)
+            prepare_contexts.append(context_text)
+            return PreparedSayResult(
+                source_text=text,
+                target_text=f"译:{text}",
+                pcm=np.ones(160, dtype=np.int16),
+                target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+                target=target,
+                translation_latency_s=0.1,
+                tts_latency_s=0.2,
+                decode_latency_s=0.01,
+            )
+
+        def play_prepared(self, prepared: PreparedSayResult) -> SayResult:
+            return SayResult(
+                source_text=prepared.source_text,
+                target_text=prepared.target_text,
+                bytes_written=320,
+                target_device_name=prepared.target_device.name,
+                translation_latency_s=prepared.translation_latency_s,
+                tts_latency_s=prepared.tts_latency_s,
+                decode_latency_s=prepared.decode_latency_s,
+                playback_latency_s=0.1,
+            )
+
+    class FakeBridge:
+        transcriber = FakeTranscriber()
+        say_bridge = FakeSayBridge()
+
+    monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
+    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "1",
+            "--end-silence-ms",
+            "30",
+            "--min-speech-ms",
+            "30",
+            "--hide-latency",
+            "--target",
+            "default",
+            "--direction",
+            "uplink",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert prepared_sources == ["我们今天讨论现金流预测", "方案和预算"]
+    assert prepare_contexts == ["", "我们今天讨论现金流预测"]
+    assert "在线识别：我们今天讨论现金流预测方案和预算" in result.output
+    assert "稳定译文：译:我们今天讨论现金流预测" in result.output
+
+
+def test_listen_command_online_asr_does_not_prepare_partials_by_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """online-asr 默认不得用未真正确认的 partial 提前打 MT/TTS。"""
+    prepared_sources: list[str] = []
+    scripted_texts = iter(
+        [
+            "我们今天讨论现金流预测",
+            "我们今天讨论现金流预测方案",
+            "我们今天讨论现金流预测方案和预算",
+        ]
+    )
+
+    class FakeStreamRecorder:
+        sample_rate_hz = 16000
+
+        def chunks(self, *, chunk_seconds: float, max_chunks: int | None = None):
+            del chunk_seconds, max_chunks
+            for _ in range(20):
+                yield np.ones(480, dtype=np.int16) * 1000
+            yield np.zeros(480, dtype=np.int16)
+
+    class FakeTranscriber:
+        def transcribe(self, samples: object) -> str:
+            del samples
+            return next(scripted_texts)
+
+    class FakeSayBridge:
+        async def prepare(
+            self,
+            text: str,
+            *,
+            direction: AudioDirection,
+            target: str,
+            streaming: bool = False,
+            context_text: str = "",
+        ) -> PreparedSayResult:
+            del context_text
+            assert direction is AudioDirection.UPLINK
+            assert target == "default"
+            assert streaming
+            prepared_sources.append(text)
+            return PreparedSayResult(
+                source_text=text,
+                target_text=f"译:{text}",
+                pcm=np.ones(160, dtype=np.int16),
+                target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+                target=target,
+                translation_latency_s=0.1,
+                tts_latency_s=0.2,
+                decode_latency_s=0.01,
+            )
+
+        def play_prepared(self, prepared: PreparedSayResult) -> SayResult:
+            return SayResult(
+                source_text=prepared.source_text,
+                target_text=prepared.target_text,
+                bytes_written=320,
+                target_device_name=prepared.target_device.name,
+                translation_latency_s=prepared.translation_latency_s,
+                tts_latency_s=prepared.tts_latency_s,
+                decode_latency_s=prepared.decode_latency_s,
+                playback_latency_s=0.1,
+            )
+
+    class FakeBridge:
+        transcriber = FakeTranscriber()
+        say_bridge = FakeSayBridge()
+
+    monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
+    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--chunks",
+            "1",
+            "--end-silence-ms",
+            "30",
+            "--min-speech-ms",
+            "30",
+            "--hide-latency",
+            "--target",
+            "default",
+            "--direction",
+            "uplink",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert prepared_sources == ["我们今天讨论现金流预测方案和预算"]
+    assert "默认不让 stable partial 提前调用 MT/TTS" in result.output
+    assert "稳定译文" not in result.output
+
+
+def test_listen_command_online_asr_reuses_stable_suffix_after_forced_split(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """强切续段被 overlap 去重后，仍应复用已 final 确认的 stable suffix prepare。"""
+    prepared_sources: list[str] = []
+    prepare_contexts: list[str] = []
+    scripted_texts = iter(
+        [
+            "我们今天讨论现金流预测方案",
+            "我们今天讨论现金流预测方案",
+            "我们今天讨论现金流预测方案",
+            "预测方案和预算安排以及风险缓冲",
+            "预测方案和预算安排以及风险缓冲",
+            "预测方案和预算安排以及风险缓冲",
+        ]
+    )
+
+    class FakeStreamRecorder:
+        sample_rate_hz = 16000
+
+        def chunks(self, *, chunk_seconds: float, max_chunks: int | None = None):
+            del chunk_seconds, max_chunks
+            yield from _speech_frames(3)
+            yield from _speech_frames(3)
+            yield from _silence_frames(1)
+
+    class FakeTranscriber:
+        def transcribe(self, samples: object) -> str:
+            del samples
+            return next(scripted_texts)
+
+    class FakeSayBridge:
+        async def prepare(
+            self,
+            text: str,
+            *,
+            direction: AudioDirection,
+            target: str,
+            streaming: bool = False,
+            context_text: str = "",
+        ) -> PreparedSayResult:
+            assert direction is AudioDirection.UPLINK
+            assert target == "default"
+            assert streaming
+            prepared_sources.append(text)
+            prepare_contexts.append(context_text)
+            return PreparedSayResult(
+                source_text=text,
+                target_text=f"译:{text}",
+                pcm=np.ones(160, dtype=np.int16),
+                target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+                target=target,
+                translation_latency_s=0.1,
+                tts_latency_s=0.2,
+                decode_latency_s=0.01,
+            )
+
+        def play_prepared(self, prepared: PreparedSayResult) -> SayResult:
+            return SayResult(
+                source_text=prepared.source_text,
+                target_text=prepared.target_text,
+                bytes_written=320,
+                target_device_name=prepared.target_device.name,
+                translation_latency_s=prepared.translation_latency_s,
+                tts_latency_s=prepared.tts_latency_s,
+                decode_latency_s=prepared.decode_latency_s,
+                playback_latency_s=0.1,
+            )
+
+    class FakeBridge:
+        transcriber = FakeTranscriber()
+        say_bridge = FakeSayBridge()
+
+    monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
+    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
+    monkeypatch.setattr(
+        cli_app,
+        "_new_online_asr_processor",
+        lambda *, direction, bridge: OnlineASRProcessor(
+            direction=direction,
+            transcribe_buffer=bridge.transcriber.transcribe,
+            config=WhisperStreamingConfig(step_ms=30),
+        ),
+    )
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "2",
+            "--chunk-seconds",
+            "0.09",
+            "--end-silence-ms",
+            "30",
+            "--min-speech-ms",
+            "30",
+            "--hide-latency",
+            "--target",
+            "default",
+            "--direction",
+            "uplink",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert prepared_sources == ["我们今天讨论现金流预测方案", "和预算安排以及风险缓冲"]
+    assert prepare_contexts == ["", "我们今天讨论现金流预测方案"]
+    assert "去重后：和预算安排以及风险缓冲" in result.output
+    assert "稳定译文：译:和预算安排以及风险缓冲" in result.output
+
+
+def test_listen_command_online_asr_flushes_tail_when_stream_ends(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """online-asr 输入流结束时必须收口已有人声尾段，不能等不到静音就丢。"""
+    prepared_sources: list[str] = []
+
+    class FakeStreamRecorder:
+        sample_rate_hz = 16000
+
+        def chunks(self, *, chunk_seconds: float, max_chunks: int | None = None):
+            del chunk_seconds, max_chunks
+            for _ in range(5):
+                yield np.ones(480, dtype=np.int16) * 1000
+
+    class FakeTranscriber:
+        def transcribe(self, samples: object) -> str:
+            assert np.asarray(samples).size > 0
+            return "客户续费风险缓冲"
+
+    class FakeSayBridge:
+        async def prepare(
+            self,
+            text: str,
+            *,
+            direction: AudioDirection,
+            target: str,
+            streaming: bool = False,
+            context_text: str = "",
+        ) -> PreparedSayResult:
+            del context_text
+            assert direction is AudioDirection.UPLINK
+            assert target == "default"
+            assert streaming
+            prepared_sources.append(text)
+            return PreparedSayResult(
+                source_text=text,
+                target_text=f"译:{text}",
+                pcm=np.ones(160, dtype=np.int16),
+                target_device=AudioDevice(1, "AirPods Pro", 0, 2),
+                target=target,
+                translation_latency_s=0.1,
+                tts_latency_s=0.2,
+                decode_latency_s=0.01,
+            )
+
+        def play_prepared(self, prepared: PreparedSayResult) -> SayResult:
+            return SayResult(
+                source_text=prepared.source_text,
+                target_text=prepared.target_text,
+                bytes_written=320,
+                target_device_name=prepared.target_device.name,
+                translation_latency_s=prepared.translation_latency_s,
+                tts_latency_s=prepared.tts_latency_s,
+                decode_latency_s=prepared.decode_latency_s,
+                playback_latency_s=0.1,
+            )
+
+    class FakeBridge:
+        transcriber = FakeTranscriber()
+        say_bridge = FakeSayBridge()
+
+    monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
+    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--chunks",
+            "1",
+            "--min-speech-ms",
+            "30",
+            "--hide-latency",
+            "--target",
+            "default",
+            "--direction",
+            "uplink",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert prepared_sources == ["客户续费风险缓冲"]
+    assert "在线识别：客户续费风险缓冲" in result.output
+    assert "译文：译:客户续费风险缓冲" in result.output
+
+
 def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """duplex 命令应同时启动上行和下行，并按方向选择 ASR 语种与输出目标。"""
     languages: list[str] = []
@@ -261,8 +679,9 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
             direction: AudioDirection,
             target: str,
             streaming: bool = False,
+            context_text: str = "",
         ) -> PreparedSayResult:
-            del streaming
+            del streaming, context_text
             prepared.append((text, direction, target))
             return PreparedSayResult(
                 source_text=text,

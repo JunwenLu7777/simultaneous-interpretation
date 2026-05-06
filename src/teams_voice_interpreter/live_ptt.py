@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import queue
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Literal, Protocol
+from uuid import UUID, uuid4
 
 import numpy as np
 import sounddevice as sd
@@ -17,9 +19,11 @@ from teams_voice_interpreter.audio.resample import resample_int16_mono as _resam
 from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.config import load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
+from teams_voice_interpreter.data.transcript import StableTranscriptChunk, TranscriptKind
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.live_say import LiveSayBridge, SayResult
 from teams_voice_interpreter.stt.vad import VadBackendProtocol, VadSegmenter, WebRtcBackend
+from teams_voice_interpreter.stt.whisper_streaming import LocalAgreementCommitter
 
 BLANK_TRANSCRIPT_MARKERS = {"[BLANK_AUDIO]", "[NO_SPEECH]", "[NO SPEECH]"}
 HALLUCINATION_MARKERS = frozenset(
@@ -114,12 +118,33 @@ HALLUCINATION_PREFIX_PATTERNS: frozenset[str] = frozenset(
     }
 )
 InputSource = Literal["default_input", "blackhole"]
+SpeechCloseReason = Literal["silence", "max_length", "flush"]
 
 
 class WhisperSegmentLike(Protocol):
     """Whisper 识别片段的最小协议。"""
 
     text: object
+
+
+@dataclass
+class _StableChunkStreamState:
+    """一次 pywhispercpp callback 流的 LocalAgreement 状态。"""
+
+    direction: AudioDirection
+    provider_model: str
+    segment_id: UUID = field(default_factory=uuid4)
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    committer: LocalAgreementCommitter = field(default_factory=LocalAgreementCommitter)
+
+
+@dataclass(frozen=True)
+class SpeechSegment:
+    """VAD 输出的语音段及其与上一段的连续关系。"""
+
+    samples: np.ndarray
+    continues_previous: bool
+    closed_by: SpeechCloseReason
 
 
 @dataclass
@@ -234,7 +259,32 @@ class StreamingAudioRecorder:
         max_segments: int | None = None,
         vad_backend: VadBackendProtocol | None = None,
     ) -> Iterable[np.ndarray]:
-        """按 VAD + 尾部静音 + 最大窗口输出稳定语音段。
+        """按 VAD + 尾部静音 + 最大窗口输出稳定语音段。"""
+        for segment in self.speech_segments(
+            max_segment_seconds=max_segment_seconds,
+            end_silence_ms=end_silence_ms,
+            min_speech_ms=min_speech_ms,
+            overlap_seconds=overlap_seconds,
+            frame_ms=frame_ms,
+            rms_threshold=rms_threshold,
+            max_segments=max_segments,
+            vad_backend=vad_backend,
+        ):
+            yield segment.samples
+
+    def speech_segments(
+        self,
+        *,
+        max_segment_seconds: float,
+        end_silence_ms: int = 700,
+        min_speech_ms: int = 600,
+        overlap_seconds: float = 1.0,
+        frame_ms: int = 30,
+        rms_threshold: float = 160.0,
+        max_segments: int | None = None,
+        vad_backend: VadBackendProtocol | None = None,
+    ) -> Iterable[SpeechSegment]:
+        """输出带连续关系的语音段，供下游按真实切段原因保留长句 burst。
 
         vad_backend 决定每帧的 sample 数（webrtc 30 ms / silero 32 ms）；外部 frame_ms
         参数仅在 vad_backend 为 None 且需要回退到旧行为时使用。
@@ -254,9 +304,7 @@ class StreamingAudioRecorder:
             )
         if vad_backend is None:
             vad_backend = WebRtcBackend()
-        actual_frame_ms = round(
-            vad_backend.frame_samples * 1000 / vad_backend.sample_rate_hz
-        )
+        actual_frame_ms = round(vad_backend.frame_samples * 1000 / vad_backend.sample_rate_hz)
         segmenter = _StableSpeechSegmenter(
             overlap_frames=max(0, int(overlap_seconds * 1000 / actual_frame_ms)),
             end_silence_frames=max(1, end_silence_ms // actual_frame_ms),
@@ -265,18 +313,43 @@ class StreamingAudioRecorder:
         )
         vad = VadSegmenter(backend=vad_backend, sample_rate_hz=self.sample_rate_hz)
         emitted = 0
+        previous_closed_by_max_length = False
+        boundary_silence_frames = 0
 
         for frame in self.chunks(chunk_seconds=actual_frame_ms / 1000):
+            is_speech = _is_speech_frame(frame, vad=vad, rms_threshold=rms_threshold)
             segment = segmenter.accept(
                 frame,
-                is_speech=_is_speech_frame(frame, vad=vad, rms_threshold=rms_threshold),
+                is_speech=is_speech,
             )
             if segment is None:
+                previous_closed_by_max_length, boundary_silence_frames = (
+                    _update_forced_split_continuation_on_open_frame(
+                        segmenter=segmenter,
+                        previous_closed_by_max_length=previous_closed_by_max_length,
+                        boundary_silence_frames=boundary_silence_frames,
+                        is_speech=is_speech,
+                    )
+                )
                 continue
             emitted += 1
-            yield segment
+            close_reason = segmenter.last_close_reason or "silence"
+            yield SpeechSegment(
+                samples=segment,
+                continues_previous=previous_closed_by_max_length,
+                closed_by=close_reason,
+            )
+            previous_closed_by_max_length = close_reason == "max_length"
+            boundary_silence_frames = 0
             if max_segments is not None and emitted >= max_segments:
                 return
+        segment = segmenter.flush()
+        if segment is not None:
+            yield SpeechSegment(
+                samples=segment,
+                continues_previous=previous_closed_by_max_length,
+                closed_by=segmenter.last_close_reason or "flush",
+            )
 
     def _input_device(self, probe: AudioDeviceProbe) -> AudioDevice:
         if self.input_source == "blackhole":
@@ -343,6 +416,7 @@ class _StableSpeechSegmenter:
     segment_frames: list[np.ndarray] = field(default_factory=list)
     speech_frames: int = 0
     silent_frames: int = 0
+    last_close_reason: SpeechCloseReason | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.pre_roll = deque(maxlen=self.overlap_frames)
@@ -357,9 +431,19 @@ class _StableSpeechSegmenter:
         if self._should_discard_as_noise():
             self._discard_segment()
             return None
-        if not self._should_close():
+        close_reason = self._close_reason()
+        if close_reason is None:
             return None
-        return self._close_segment()
+        return self._close_segment(reason=close_reason)
+
+    def flush(self) -> np.ndarray | None:
+        """输入流结束时收口已满足最短人声要求的尾段，避免尾巴静默丢失。"""
+        if not self.segment_frames:
+            return None
+        if self.speech_frames < self.min_speech_frames:
+            self._discard_segment()
+            return None
+        return self._close_segment(reason="flush")
 
     def _start_or_buffer(self, frame: np.ndarray, *, is_speech: bool) -> None:
         if not is_speech:
@@ -383,20 +467,28 @@ class _StableSpeechSegmenter:
             and self.silent_frames >= self.end_silence_frames
         )
 
-    def _should_close(self) -> bool:
+    def _close_reason(self) -> SpeechCloseReason | None:
         has_enough_speech = self.speech_frames >= self.min_speech_frames
         has_tail_silence = self.silent_frames >= self.end_silence_frames
         reached_max_length = len(self.segment_frames) >= self.max_segment_frames
-        return has_enough_speech and (has_tail_silence or reached_max_length)
+        if not has_enough_speech:
+            return None
+        if has_tail_silence:
+            return "silence"
+        if reached_max_length:
+            return "max_length"
+        return None
 
     def _discard_segment(self) -> None:
         self.pre_roll.extend(self._carry_frames(self.segment_frames))
+        self.last_close_reason = None
         self._reset()
 
-    def _close_segment(self) -> np.ndarray:
+    def _close_segment(self, *, reason: SpeechCloseReason) -> np.ndarray:
         stable_frames = self._stable_frames()
         segment = _concat_frames(stable_frames)
         self.pre_roll = deque(self._carry_frames(stable_frames), maxlen=self.overlap_frames)
+        self.last_close_reason = reason
         self._reset()
         return segment
 
@@ -416,6 +508,23 @@ class _StableSpeechSegmenter:
         self.silent_frames = 0
 
 
+def _update_forced_split_continuation_on_open_frame(
+    *,
+    segmenter: _StableSpeechSegmenter,
+    previous_closed_by_max_length: bool,
+    boundary_silence_frames: int,
+    is_speech: bool,
+) -> tuple[bool, int]:
+    if not previous_closed_by_max_length:
+        return False, 0
+    if segmenter.segment_frames or is_speech:
+        return True, 0
+    boundary_silence_frames += 1
+    if boundary_silence_frames >= segmenter.end_silence_frames:
+        return False, 0
+    return True, boundary_silence_frames
+
+
 class WhisperOneShotTranscriber:
     """用 pywhispercpp 做一次短语音识别。"""
 
@@ -431,7 +540,12 @@ class WhisperOneShotTranscriber:
         self.initial_prompt = initial_prompt
         self._model = Model(self.model_name)
 
-    def transcribe(self, samples: np.ndarray) -> str:
+    def transcribe(
+        self,
+        samples: np.ndarray,
+        *,
+        stable_chunk_callback: Callable[[StableTranscriptChunk], None] | None = None,
+    ) -> str:
         """识别一段 16 kHz mono PCM。"""
         if samples.size == 0:
             raise UserFacingError(
@@ -440,13 +554,29 @@ class WhisperOneShotTranscriber:
                 next_action="下一步如何做：请确认麦克风权限和输入音量后重试。",
             )
         audio = samples.astype(np.float32) / 32768.0
-        segments = self._model.transcribe(
-            audio,
-            language=self.language,
-            no_context=True,
-            initial_prompt=self.initial_prompt,
-            print_progress=False,
+        params: dict[str, object] = {
+            "language": self.language,
+            "no_context": True,
+            "initial_prompt": self.initial_prompt,
+            "print_progress": False,
+        }
+        stream_state = _StableChunkStreamState(
+            direction=AudioDirection.UPLINK if self.language == "zh" else AudioDirection.DOWNLINK,
+            provider_model=self.model_name,
         )
+        observed_segments: list[WhisperSegmentLike] = []
+        if stable_chunk_callback is not None:
+
+            def on_new_segment(segment: WhisperSegmentLike) -> None:
+                observed_segments.append(segment)
+                _emit_partial_stable_chunk(
+                    observed_segments,
+                    stream_state=stream_state,
+                    callback=stable_chunk_callback,
+                )
+
+            params["new_segment_callback"] = on_new_segment
+        segments = self._model.transcribe(audio, **params)
         text = _transcript_text_from_segments(segments)
         if not text:
             raise UserFacingError(
@@ -454,7 +584,65 @@ class WhisperOneShotTranscriber:
                 what_happened="发生了什么：Whisper 没有识别到文本。",
                 next_action="下一步如何做：请靠近麦克风重试，或增加 `--seconds` 时长。",
             )
+        if stable_chunk_callback is not None:
+            _emit_final_stable_chunk(
+                text,
+                stream_state=stream_state,
+                callback=stable_chunk_callback,
+            )
         return text
+
+
+def _emit_partial_stable_chunk(
+    segments: Iterable[WhisperSegmentLike],
+    *,
+    stream_state: _StableChunkStreamState,
+    callback: Callable[[StableTranscriptChunk], None],
+) -> None:
+    try:
+        cumulative_text = _transcript_text_from_segments(segments)
+    except UserFacingError:
+        return
+    delta_text = stream_state.committer.accept_partial(cumulative_text)
+    if not delta_text:
+        return
+    callback(
+        StableTranscriptChunk(
+            segment_id=stream_state.segment_id,
+            direction=stream_state.direction,
+            kind=TranscriptKind.PARTIAL,
+            started_at=stream_state.started_at,
+            text=stream_state.committer.committed_text,
+            delta_text=delta_text,
+            confidence=0.82,
+            provider_model=stream_state.provider_model,
+        )
+    )
+
+
+def _emit_final_stable_chunk(
+    text: str,
+    *,
+    stream_state: _StableChunkStreamState,
+    callback: Callable[[StableTranscriptChunk], None],
+) -> None:
+    final = stream_state.committer.accept_final(text)
+    if not final.text:
+        return
+    callback(
+        StableTranscriptChunk(
+            segment_id=stream_state.segment_id,
+            direction=stream_state.direction,
+            kind=TranscriptKind.FINAL,
+            started_at=stream_state.started_at,
+            ended_at=datetime.now(UTC),
+            text=final.text,
+            delta_text=final.delta_text,
+            confidence=0.95,
+            revision=final.revision,
+            provider_model=stream_state.provider_model,
+        )
+    )
 
 
 class LivePushToTalkBridge:

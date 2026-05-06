@@ -60,3 +60,23 @@ def test_probe_rejects_unset_default_input(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(Exception, match="默认输入设备"):
         AudioDeviceProbe().get_default_input()
+
+
+def test_probe_rejects_stale_default_input_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认输入索引指向已移除设备时必须 fail-closed，而不是越界异常。"""
+    devices = [{"name": "Speaker", "max_input_channels": 0, "max_output_channels": 2}]
+    monkeypatch.setattr("teams_voice_interpreter.audio.routing.sd.query_devices", lambda: devices)
+    monkeypatch.setattr("teams_voice_interpreter.audio.routing.sd.default.device", [4, 0])
+
+    with pytest.raises(Exception, match="默认输入设备索引 4 已不存在"):
+        AudioDeviceProbe().get_default_input()
+
+
+def test_probe_rejects_stale_default_output_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认输出索引指向已移除设备时必须 fail-closed，而不是越界异常。"""
+    devices = [{"name": "Mic", "max_input_channels": 1, "max_output_channels": 0}]
+    monkeypatch.setattr("teams_voice_interpreter.audio.routing.sd.query_devices", lambda: devices)
+    monkeypatch.setattr("teams_voice_interpreter.audio.routing.sd.default.device", [0, 9])
+
+    with pytest.raises(Exception, match="默认输出设备索引 9 已不存在"):
+        AudioDeviceProbe().get_default_output()

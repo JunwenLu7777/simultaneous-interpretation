@@ -5,6 +5,8 @@ import pytest
 
 from teams_voice_interpreter import live_ptt
 from teams_voice_interpreter.audio.routing import AudioDevice
+from teams_voice_interpreter.data.audio_segment import AudioDirection
+from teams_voice_interpreter.data.transcript import TranscriptKind
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.live_ptt import (
     MicrophoneRecorder,
@@ -284,6 +286,107 @@ def test_streaming_microphone_recorder_segments_speech_after_tail_silence(monkey
     assert np.all(segments[0] == 1000)
 
 
+def test_streaming_microphone_recorder_flushes_open_speech_on_stream_end(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """输入流结束但尚未等到尾部静音时，已达最短人声的尾段不得被丢弃。"""
+    monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
+    recorder = StreamingMicrophoneRecorder(sample_rate_hz=16000)
+    speech = np.ones(480, dtype=np.int16) * 1000
+
+    def fake_chunks(*, chunk_seconds: float, max_chunks: int | None = None):
+        assert chunk_seconds == 0.03
+        assert max_chunks is None
+        yield speech
+        yield speech
+        yield speech
+
+    monkeypatch.setattr(recorder, "chunks", fake_chunks)
+
+    segments = list(
+        recorder.segments(
+            max_segment_seconds=2,
+            end_silence_ms=60,
+            min_speech_ms=60,
+            overlap_seconds=0,
+            frame_ms=30,
+            rms_threshold=160,
+            max_segments=1,
+        )
+    )
+
+    assert len(segments) == 1
+    assert segments[0].shape == (1440,)
+    assert np.all(segments[0] == 1000)
+
+
+def test_streaming_microphone_recorder_marks_forced_split_continuation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """长句因最大段长强切后，下一段必须标记为延续同一语流。"""
+    monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
+    recorder = StreamingMicrophoneRecorder(sample_rate_hz=16000)
+    speech = np.ones(480, dtype=np.int16) * 1000
+
+    def fake_chunks(*, chunk_seconds: float, max_chunks: int | None = None):
+        assert chunk_seconds == 0.03
+        assert max_chunks is None
+        for _ in range(5):
+            yield speech
+
+    monkeypatch.setattr(recorder, "chunks", fake_chunks)
+
+    segments = list(
+        recorder.speech_segments(
+            max_segment_seconds=0.06,
+            end_silence_ms=300,
+            min_speech_ms=30,
+            overlap_seconds=0.03,
+            frame_ms=30,
+            rms_threshold=160,
+            max_segments=2,
+        )
+    )
+
+    assert len(segments) == 2
+    assert [segment.closed_by for segment in segments] == ["max_length", "max_length"]
+    assert [segment.continues_previous for segment in segments] == [False, True]
+
+
+def test_streaming_microphone_recorder_resets_forced_split_after_boundary_silence(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """强切后若先出现足够静音，下一句话不得误归入上一句 burst。"""
+    monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
+    recorder = StreamingMicrophoneRecorder(sample_rate_hz=16000)
+    silence = np.zeros(480, dtype=np.int16)
+    speech = np.ones(480, dtype=np.int16) * 1000
+
+    def fake_chunks(*, chunk_seconds: float, max_chunks: int | None = None):
+        assert chunk_seconds == 0.03
+        assert max_chunks is None
+        yield speech
+        yield speech
+        yield silence
+        yield silence
+        yield speech
+        yield speech
+
+    monkeypatch.setattr(recorder, "chunks", fake_chunks)
+
+    segments = list(
+        recorder.speech_segments(
+            max_segment_seconds=0.06,
+            end_silence_ms=60,
+            min_speech_ms=30,
+            overlap_seconds=0,
+            frame_ms=30,
+            rms_threshold=160,
+            max_segments=2,
+        )
+    )
+
+    assert len(segments) == 2
+    assert [segment.closed_by for segment in segments] == ["max_length", "max_length"]
+    assert [segment.continues_previous for segment in segments] == [False, False]
+
+
 def test_streaming_microphone_recorder_discards_too_short_speech(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """短促噪声不足最短人声阈值时不得送入 Whisper。"""
     monkeypatch.setattr(live_ptt, "_is_speech_frame", _rms_only_speech_decider)
@@ -530,3 +633,79 @@ def test_whisper_transcriber_forces_chinese_language_and_multi_segment() -> None
         "initial_prompt": "同声传译软件",
         "print_progress": False,
     }
+
+
+def test_whisper_transcriber_emits_stable_chunks_from_model_callback() -> None:
+    """pywhispercpp new_segment_callback 必须进入 LocalAgreement 稳定增量边界。"""
+    captured: dict[str, object] = {}
+
+    class FakeModel:
+        def transcribe(self, audio: np.ndarray, **params: object) -> list[Segment]:
+            captured["audio_dtype"] = audio.dtype
+            captured.update(params)
+            callback = params["new_segment_callback"]
+            assert callable(callback)
+            callback(Segment("我们今天"))
+            callback(Segment("讨论现金流"))
+            callback(Segment("预测"))
+            return [Segment("我们今天"), Segment("讨论现金流"), Segment("预测")]
+
+    transcriber = WhisperOneShotTranscriber.__new__(WhisperOneShotTranscriber)
+    transcriber.model_name = "small-q5_1"
+    transcriber.language = "zh"
+    transcriber.initial_prompt = "同声传译软件"
+    transcriber._model = FakeModel()
+    chunks = []
+
+    text = transcriber.transcribe(
+        np.array([0, 32767], dtype=np.int16),
+        stable_chunk_callback=chunks.append,
+    )
+
+    assert text == "我们今天讨论现金流预测"
+    assert [chunk.kind for chunk in chunks] == [
+        TranscriptKind.PARTIAL,
+        TranscriptKind.PARTIAL,
+        TranscriptKind.FINAL,
+    ]
+    assert [chunk.text for chunk in chunks] == [
+        "我们今天",
+        "我们今天讨论现金流",
+        "我们今天讨论现金流预测",
+    ]
+    assert [chunk.delta_text for chunk in chunks] == ["我们今天", "讨论现金流", "预测"]
+    assert [chunk.revision for chunk in chunks] == [False, False, False]
+    assert {chunk.direction for chunk in chunks} == {AudioDirection.UPLINK}
+    assert captured["language"] == "zh"
+    assert "new_segment_callback" in captured
+
+
+def test_whisper_transcriber_marks_final_revision_without_duplicate_delta() -> None:
+    """final 改写已提交前缀时，callback final 必须标记 revision 且不伪造 delta。"""
+
+    class FakeModel:
+        def transcribe(self, audio: np.ndarray, **params: object) -> list[Segment]:
+            del audio
+            callback = params["new_segment_callback"]
+            assert callable(callback)
+            callback(Segment("我们今天"))
+            callback(Segment("讨论"))
+            return [Segment("今天我们讨论")]
+
+    transcriber = WhisperOneShotTranscriber.__new__(WhisperOneShotTranscriber)
+    transcriber.model_name = "small-q5_1"
+    transcriber.language = "zh"
+    transcriber.initial_prompt = ""
+    transcriber._model = FakeModel()
+    chunks = []
+
+    text = transcriber.transcribe(
+        np.array([0, 32767], dtype=np.int16),
+        stable_chunk_callback=chunks.append,
+    )
+
+    assert text == "今天我们讨论"
+    assert [(chunk.kind, chunk.text, chunk.delta_text, chunk.revision) for chunk in chunks] == [
+        (TranscriptKind.PARTIAL, "我们今天", "我们今天", False),
+        (TranscriptKind.FINAL, "今天我们讨论", "", True),
+    ]

@@ -67,20 +67,23 @@ allow_shared_virtual_device = false
 ```bash
 tvi duplex --show-latency
 tvi duplex --chunks 5 --show-latency
-tvi duplex --chunk-seconds 6 --end-silence-ms 500 --min-speech-ms 450
+tvi duplex --chunk-seconds 6 --end-silence-ms 280 --min-speech-ms 300
+tvi duplex --online-asr --chunks 5 --show-latency
 ```
 
 参数：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--chunk-seconds FLOAT` | `6.0` | 单段最大秒数。到达该长度会强制切段；尾部静音可更早收段。 |
+| `--chunk-seconds FLOAT` | `6.0` | 单段最大秒数。到达该长度会强制切段；尾部静音可更早收段。低延迟实验可手动调小，但过短会伤准确度。 |
 | `--chunks INTEGER` | 不限制 | 最多处理多少个分片。真测建议先用 `--chunks 5`，方便收敛和记录。 |
-| `--end-silence-ms INTEGER` | `500` | 检测到人声后，连续静音多少毫秒即收段。值越小越快，但更容易断句。 |
-| `--min-speech-ms INTEGER` | `450` | 少于该时长的人声片段当作噪声丢弃。值越小越敏感，也更容易误触发。 |
+| `--end-silence-ms INTEGER` | `280` | 检测到人声后，连续静音多少毫秒即收段。值越小越快，但更容易断句。 |
+| `--min-speech-ms INTEGER` | `300` | 少于该时长的人声片段当作噪声丢弃。值越小越敏感，也更容易误触发。 |
 | `--overlap-seconds FLOAT` | `0.6` | 强制切段时带入下一段的音频重叠秒数，减少边界漏字。 |
 | `--speech-rms-threshold FLOAT` | `180.0` | 判定有效人声的 RMS 阈值。环境噪声高时可调大，识别不触发时可调小。 |
 | `--show-latency / --hide-latency` | `--show-latency` | 是否打印每段延迟剖面。真测时建议保持开启。 |
+| `--online-asr / --segment-asr` | `--segment-asr` | 实验模式开关。启用后持续喂音频 chunk 产生稳定 partial；默认仍使用整段 ASR，避免未经真测的高频 Whisper 重跑影响准确率或 CPU。 |
+| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关。只有先用 `scripts/probe_online_asr.py` 证明 final 可确认 partial 达标后，才建议启用；否则 partial 不会提前调用 MT/TTS。 |
 | `--allow-shared-virtual-device` | 关闭 | 仅临时测试用，允许上行输出和下行输入使用同一个虚拟设备。正式会议不建议启用。 |
 
 ### 单向连续监听：`tvi listen`
@@ -90,6 +93,7 @@ tvi duplex --chunk-seconds 6 --end-silence-ms 500 --min-speech-ms 450
 ```bash
 tvi listen --target blackhole --direction uplink --chunks 3
 tvi listen --target default --direction downlink --chunks 3 --show-latency
+tvi listen --online-asr --target default --direction uplink --chunks 3
 ```
 
 参数：
@@ -100,11 +104,13 @@ tvi listen --target default --direction downlink --chunks 3 --show-latency
 | `--direction auto\|uplink\|downlink` | `auto` | 翻译方向。`uplink` = 中文到英文；`downlink` = 英文到中文；`auto` 根据 `target` 推断。 |
 | `--chunk-seconds FLOAT` | `6.0` | 同 `duplex`。 |
 | `--chunks INTEGER` | 不限制 | 同 `duplex`。 |
-| `--end-silence-ms INTEGER` | `500` | 同 `duplex`。 |
-| `--min-speech-ms INTEGER` | `450` | 同 `duplex`。 |
+| `--end-silence-ms INTEGER` | `280` | 同 `duplex`。 |
+| `--min-speech-ms INTEGER` | `300` | 同 `duplex`。 |
 | `--overlap-seconds FLOAT` | `0.6` | 同 `duplex`。 |
 | `--speech-rms-threshold FLOAT` | `180.0` | 同 `duplex`。 |
 | `--show-latency / --hide-latency` | `--show-latency` | 同 `duplex`。 |
+| `--online-asr / --segment-asr` | `--segment-asr` | 同 `duplex`。 |
+| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 同 `duplex`。 |
 
 ### 短句发声测试：`tvi say`
 
@@ -143,6 +149,7 @@ tvi ptt --seconds 5 --target default --direction downlink
 ### 会前检查：`tvi doctor`
 
 进入会议前的阻断项检查。失败会非 0 退出，并输出「发生了什么 + 下一步如何做」。
+`--mode realtime` 通过只表示会议测试通路可进入，不表示首段低延迟已经达标。
 
 ```bash
 tvi doctor
@@ -157,6 +164,17 @@ tvi doctor --deepseek-api-key-env DEEPSEEK_API_KEY
 | `--mode phrase\|realtime` | `phrase` | `phrase` 检查短句播入路径；`realtime` 检查真实双向同传路径。 |
 | `--confirm-teams-route` | 关闭 | 表示你已手动确认会议软件麦克风/扬声器路由。 |
 | `--deepseek-api-key-env TEXT` | `DEEPSEEK_API_KEY` | DeepSeek API Key 所在环境变量名。 |
+
+### 设备清单：`tvi devices`
+
+列出当前 CoreAudio 输入 / 输出设备、默认设备、虚拟路由标记和真实候选。用于处理
+`doctor` 报出的默认输入 / 输出设备阻断项。
+
+```bash
+tvi devices
+```
+
+该命令只读，不修改系统音频设置。
 
 ### 首次向导：`tvi wizard`
 
@@ -206,19 +224,23 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 
 - `ASR`：VAD 收段后 Whisper.cpp 整段识别耗时
 - `prepare墙钟`：识别完成到译文 / 流式 PCM producer 准备完成
-- `排队(q,drop)`：译音等待实时播放 worker 的时间，以及入队前丢弃的旧段数
+- `排队(q,drop)`：译音等待实时播放 worker 的时间，以及入队前丢弃的旧段数；默认不主动清队列，`drop` 应为 0，若 `q>=3` 会提示播放积压
 - `首PCM`：识别完成到第一块 PCM 可喂入播放
 - `首写`：识别完成到 `OutputStream` callback 真正取到有效音频
 - `首字节`：优先使用 `首写`，没有 callback 指标时回退到 `首PCM`
-- `播放`：实时播放耗时；实时模式可能显示 `截断≤3.0s`
+- `播放`：实时播放耗时；仅显式配置播放上限时才可能显示 `截断`
 
 ## 当前实时策略与限制
 
 `listen` / `duplex` 是实时路径，和 `tvi say` 的完整播放路径不同：
 
-- 实时播放队列只保留最新未播放段，旧段可被丢弃。
-- 等待播放超过 1.5 秒的译音会被跳过，避免播出过期内容。
-- 单段实时播放上限为 3 秒，长段会截断。
+- 实时播放默认完整播放，不再用 3 秒上限截断长句译音。
+- 同一长句被切成多个连续分片时，同 burst 分片按 FIFO 保留，不因 stale 检查丢弃中间段。
+- 连续长句默认最大 6 秒强制切段，切段时保留 0.6 秒音频 overlap，并在文本层去掉相邻段重叠前缀，避免 overlap 重复播；实测过短强切会降低 Whisper 准确度，因此不默认改成 2.5 秒。
+- 输入流结束但尚未等到尾部静音时，会 flush 已满足最短人声阈值的尾段，避免长句最后一段静默丢失。
+- 入队前默认不主动丢弃旧 burst，避免长句分片被误判成新 burst 后丢失。
+- 播放队列默认不使用 3 段小队列阻塞 ASR worker；积压达到 3 段时会明确提示「内容会保留，但端到端延迟正在升高」。
+- 默认不启用 stale 播放跳过；低延迟实验若显式开启 stale 窗口，也不得用于长句切割后的同一语流。
 - 实时 Edge-TTS 首音频超时为 3 秒，总合成超时为 8 秒，不做重试；失败段直接丢弃。
 - `tvi say` / `play_prepared` 保持完整播放和原重试契约，用于非实时测试。
 
@@ -232,7 +254,23 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 
 - ASR 仍是 VAD 收段后的整段 Whisper.cpp 识别，常见 1.25-2.30 秒。
 - Edge-TTS 首写常见 1.6-2.0 秒。
-- 当前默认不启用 partial / sliding ASR；若要继续压低延迟，需要在保留准确性的前提下新增可选低延迟 ASR 模式。
+- 已新增 LocalAgreement 稳定增量边界和 `--online-asr` 实验入口：累计全文、增量 `delta_text` 与 final 修正标记分离；真实 pywhispercpp `new_segment_callback` 在 one-shot 模式下接近 final 时才触发，因此默认 `listen` / `duplex` 路径仍是 VAD 收段 + 6 秒兜底强制切段 + overlap 保守去重。
+- 当前 `--online-asr` 通过高频重跑本地 Whisper one-shot 模拟 partial。默认不会让 partial 提前调用 MT/TTS，避免未确认文本消耗外部调用；只有显式加 `--online-asr-early-prepare` 才会启用提前准备。
+- 探针会按「final 可确认的可翻译 stable partial」判定真实收益，并把实时音频到达下界计入 partial 时间；若该指标为 `n/a`，说明提前准备的 partial 会被 final 修正取消，实际不会降低首段播出延迟。
+- 播放积压超过内部阈值时，实时路径会整句级清理跨 burst 旧段；同一长句被强制切段形成的同 burst 片段仍按顺序保留，避免中段丢失。
+- 若要继续压低延迟，需要引入真正的 sliding / partial ASR 引擎，而不是只依赖 pywhispercpp one-shot callback。
+- 后续低延迟优化不得再通过丢弃同一长句分片或截断播放来达成，必须改在 ASR partial / LocalAgreement、MT 子句增量和 TTS 热流启动上。
+
+本地 WAV 可用 `scripts/probe_online_asr.py` 探测 `--online-asr` 的 stable partial 延迟与 final 准确率：
+
+```bash
+uv run --extra dev scripts/probe_online_asr.py /tmp/long_zh.wav \
+  --expected-text "我们今天讨论现金流预测方案和下季度预算安排" \
+  --max-first-partial-s 1.2 \
+  --max-cer 0.12
+```
+
+输出包含首个稳定 partial、首个可翻译 stable partial、首个 final 可确认的可翻译 stable partial、final 文本、CER 与阈值失败提示；partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」估算，`--max-first-partial-s` 按 final 可确认的可翻译 partial 判定，避免把一个字的 early partial 或离线快速喂音频耗时误当成真实低延迟收益。
 
 ## 监管严格场景免责声明
 

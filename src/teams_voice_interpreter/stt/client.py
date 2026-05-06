@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 
 from teams_voice_interpreter.audio.capture import AudioFrame
 from teams_voice_interpreter.data.audio_segment import AudioDirection
-from teams_voice_interpreter.data.transcript import TranscriptSegment
+from teams_voice_interpreter.data.transcript import StableTranscriptChunk, TranscriptSegment
 from teams_voice_interpreter.errors import WhisperError
 from teams_voice_interpreter.stt.whisper_streaming import (
+    OnlineASRProcessor,
+    TranscribeBuffer,
     WhisperStreamingConfig,
     WhisperStreamingWrapper,
 )
@@ -46,6 +48,30 @@ class WhisperClient:
             direction=direction,
             fixture_text=fixture_text,
         )
+
+    def start_online(
+        self,
+        *,
+        direction: AudioDirection,
+        transcribe_buffer: TranscribeBuffer,
+    ) -> OnlineASRProcessor:
+        """创建一路可持续 feed 的在线 ASR processor。"""
+        self.last_heartbeat_at = datetime.now(UTC)
+        return OnlineASRProcessor(
+            direction=direction,
+            transcribe_buffer=transcribe_buffer,
+            config=self.wrapper.config,
+        )
+
+    def close_online_segment(
+        self,
+        processor: OnlineASRProcessor,
+        *,
+        final_text: str | None = None,
+    ) -> list[StableTranscriptChunk]:
+        """收口在线 ASR segment，并刷新 heartbeat。"""
+        self.last_heartbeat_at = datetime.now(UTC)
+        return processor.close_segment(final_text=final_text)
 
     def handle_stream_interruption(self, *, direction: AudioDirection) -> list[WhisperStatusEvent]:
         """STT 流中断时先推 retry 状态，再推最终失败占位。"""

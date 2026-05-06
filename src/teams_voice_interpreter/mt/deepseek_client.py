@@ -93,6 +93,7 @@ class DeepSeekStreamingClient:
         text: str,
         *,
         direction: AudioDirection,
+        context_text: str = "",
     ) -> AsyncIterator[TranslationChunk]:
         """返回流式译文；注入 responder 时走本地测试分支，否则走 DeepSeek HTTP。"""
         try:
@@ -101,7 +102,7 @@ class DeepSeekStreamingClient:
                 yield TranslationChunk(kind="delta", text=translated)
                 yield TranslationChunk(kind="completed", text=translated)
                 return
-            async for chunk in self._translate_http(text, direction):
+            async for chunk in self._translate_http(text, direction, context_text=context_text):
                 yield chunk
         except httpx.HTTPError as error:
             raise DeepSeekError(
@@ -121,6 +122,8 @@ class DeepSeekStreamingClient:
         self,
         text: str,
         direction: AudioDirection,
+        *,
+        context_text: str = "",
     ) -> AsyncIterator[TranslationChunk]:
         api_key = self._api_key or os.getenv("DEEPSEEK_API_KEY", "")
         if not api_key:
@@ -133,7 +136,7 @@ class DeepSeekStreamingClient:
             "model": self._model,
             "messages": [
                 {"role": "system", "content": build_system_prompt(direction, [])},
-                {"role": "user", "content": text},
+                {"role": "user", "content": _translation_user_content(text, context_text)},
             ],
             "stream": True,
             "temperature": 0.2,
@@ -162,3 +165,16 @@ class DeepSeekStreamingClient:
         finally:
             if close_client:
                 await client.aclose()
+
+
+def _translation_user_content(text: str, context_text: str) -> str:
+    source_text = text.strip()
+    context = context_text.strip()
+    if not context:
+        return source_text
+    return (
+        "已确认上文仅供上下文理解，不要重复翻译上文。\n"
+        f"已确认上文：{context}\n"
+        f"当前片段：{source_text}\n"
+        "请只输出当前片段的译文，并保持与上文术语和指代一致。"
+    )

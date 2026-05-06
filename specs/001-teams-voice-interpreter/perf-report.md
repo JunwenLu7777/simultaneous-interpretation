@@ -3,7 +3,7 @@
 **日期**：2026-05-05
 **Git commit**：未提交工作区
 **硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Edge-TTS 外网基准待发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）均有可执行测试入口并在当前模拟基准下通过。当前报告用于实现期门禁闭合；发布前必须在真实 M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps 环境复跑并替换模拟数据。
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）均有可执行测试入口并在当前模拟基准下通过。当前报告用于实现期门禁闭合；发布前必须在真实 M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps 环境复跑并替换模拟数据。`--online-asr` 实验路径不计入下表通过项；2026-05-06 本机探针显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
@@ -21,6 +21,22 @@
 | BM-11 | SC-003 | 整段 p50 1800 ms / p95 3200 ms | p50 ≤ 2.5 s / p95 ≤ 4.0 s | Pass | 无 |
 | BM-12 | SC-004 | 60 分钟用户感知中断 0 次 | = 0 | Pass | 无 |
 | BM-13 | SC-004 / 宪章 IV | 24h 内存增长 2.5% | ≤ 5% | Pass | 无 |
+
+## Online ASR 实验探针
+
+**日期**：2026-05-06
+**音频**：macOS `say -v Tingting` 生成 12.89 秒中文商务长句 WAV，16 kHz mono PCM
+**命令入口**：`uv run --extra dev scripts/probe_online_asr.py /tmp/tvi_probe.wav --expected-text ... --max-first-partial-s ... --max-cer ...`
+**计时口径**：2026-05-06 对抗审查后，探针的 partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」计算，不再使用离线快速喂完整段音频的偏乐观耗时。
+
+| 模型 / 参数 | ASR 重跑次数 | 首个 stable partial | 首个可翻译 stable partial | 首个 final 可确认可翻译 stable partial | final ASR | CER | 结论 |
+|-------------|--------------|---------------------|----------------------------|----------------------------------------|-----------|-----|------|
+| `small-q5_1`, `step_ms=300` | 43 | 0.79 s | 3.49 s | n/a | 0.40 s | 0.107 | Fail：提前 partial 未被 final 确认，不能降低首段播出延迟 |
+| `small-q5_1`, `step_ms=600` | 22 | 1.55 s | 3.90 s | n/a | 0.65 s | 0.107 | Fail：调大 step 仍无 final 可确认 partial |
+| `small-q5_1`, `step_ms=900` | 15 | 4.49 s | 5.18 s | n/a | 0.50 s | 0.107 | Fail：调大 step 仍无 final 可确认 partial，且首个 stable partial 已变慢 |
+| `large-v3-turbo-q5_0`, `step_ms=300` | 43 | 2.22 s | 8.83 s | 8.83 s | 1.08 s | 0.107 | Fail：有可确认 partial，但确认点远超低延迟预算 |
+
+**对抗结论**：当前 `--online-asr` 是通过高频重跑本地 Whisper one-shot 模拟 partial，不是可交付的真正 streaming ASR。默认不得让 stable partial 提前调用 MT/TTS；只有先用探针证明「final 可确认可翻译 stable partial」达标后，才可显式启用 `--online-asr-early-prepare`。继续压低延迟应接入真正 sliding / partial ASR 引擎，而不是继续调 `step_ms` 或换大模型。
 
 ## 冷启动与分发形态合规
 

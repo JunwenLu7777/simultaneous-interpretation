@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import numpy as np
 
@@ -22,12 +22,8 @@ from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.tts.edge_tts_client import DEFAULT_VOICES, EdgeTTSClient
 
-_EXPECTED_SILERO_SHA256 = (
-    "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
-)
-_DEFAULT_SILERO_VAD_MODEL_PATH = (
-    Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
-)
+_EXPECTED_SILERO_SHA256 = "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
+_DEFAULT_SILERO_VAD_MODEL_PATH = Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
 
 
 class DeviceProbe(Protocol):
@@ -57,6 +53,7 @@ class CheckStatus(StrEnum):
 
     PASS = "pass"
     FAIL = "fail"
+    INFO = "info"
 
 
 @dataclass(frozen=True)
@@ -128,6 +125,7 @@ class ReadinessChecker:
                 self._blackhole_read_dry_run_check(),
                 self._teams_route_check(),
                 self._live_pipeline_check(),
+                self._latency_scope_check(),
             ]
         )
 
@@ -206,7 +204,16 @@ class ReadinessChecker:
                 "default_input",
                 "默认输入设备",
                 f"{device.name} 是虚拟路由设备，不是真实麦克风",
-                "下一步如何做：请把 macOS 默认输入切回 AirPods、内置麦克风或真实外接麦克风。",
+                _device_switch_next_action(
+                    base=(
+                        "下一步如何做：请把 macOS 默认输入切回 AirPods、"
+                        "内置麦克风或真实外接麦克风。"
+                    ),
+                    candidates=self._physical_device_candidates(kind="input"),
+                    empty_candidates=(
+                        "当前未检测到真实输入候选；请先连接或启用真实麦克风，并确认终端有麦克风权限。"
+                    ),
+                ),
             )
         return check
 
@@ -232,7 +239,11 @@ class ReadinessChecker:
                 "default_output",
                 "默认输出设备",
                 f"{device.name} 是虚拟路由设备，不是真实耳机",
-                "下一步如何做：请把 macOS 默认输出切回 AirPods、有线耳机或真实扬声器。",
+                _device_switch_next_action(
+                    base="下一步如何做：请把 macOS 默认输出切回 AirPods、有线耳机或真实扬声器。",
+                    candidates=self._physical_device_candidates(kind="output"),
+                    empty_candidates="当前未检测到真实输出候选；请先连接或启用真实耳机/扬声器。",
+                ),
             )
         return check
 
@@ -386,6 +397,22 @@ class ReadinessChecker:
             ),
         )
 
+    def _latency_scope_check(self) -> ReadinessCheck:
+        if self.mode == "phrase":
+            return self._info(
+                "latency_scope",
+                "延迟范围说明",
+                "phrase 模式只证明短句发声路径，不证明实时同传延迟。",
+            )
+        return self._info(
+            "latency_scope",
+            "低延迟状态说明",
+            (
+                "doctor 只证明会议测试通路可进入；当前 ASR 仍以整段 Whisper.cpp 为主，"
+                "低延迟达标需要 true streaming ASR 和探针另行证明。"
+            ),
+        )
+
     def _isolated_duplex_route_check(self) -> ReadinessCheck | None:
         try:
             uplink_device = self._probe.find_output_device_by_name(
@@ -435,6 +462,16 @@ class ReadinessChecker:
             or "同传" in device_name
         )
 
+    def _physical_device_candidates(self, *, kind: Literal["input", "output"]) -> list[AudioDevice]:
+        method_name = "input_devices" if kind == "input" else "output_devices"
+        method = getattr(self._probe, method_name, None)
+        if not callable(method):
+            return []
+        devices = cast("list[AudioDevice]", method())
+        return [
+            device for device in devices if not self._looks_like_virtual_route_device(device.name)
+        ]
+
     def _device_check(
         self,
         *,
@@ -463,8 +500,29 @@ class ReadinessChecker:
             next_action=next_action,
         )
 
+    def _info(self, key: str, title: str, detail: str) -> ReadinessCheck:
+        return ReadinessCheck(
+            key=key,
+            title=title,
+            status=CheckStatus.INFO,
+            detail=detail,
+            required=False,
+        )
+
 
 DeviceLookup = Callable[[], AudioDevice]
+
+
+def _device_switch_next_action(
+    *,
+    base: str,
+    candidates: list[AudioDevice],
+    empty_candidates: str,
+) -> str:
+    if not candidates:
+        return f"{base} {empty_candidates}"
+    names = ", ".join(f"{device.name} (index={device.index})" for device in candidates)
+    return f"{base} 当前可选真实设备：{names}。"
 
 
 def _redact_secret(value: str) -> str:

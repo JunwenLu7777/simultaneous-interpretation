@@ -51,6 +51,38 @@ class VirtualDefaultProbe(PassingProbe):
         return AudioDevice(2, "Teams 同传聚合", 2, 2)
 
 
+class VirtualDefaultWithCandidatesProbe(VirtualDefaultProbe):
+    """模拟默认设备是虚拟路由，但系统能看到真实候选设备。"""
+
+    def input_devices(self) -> list[AudioDevice]:
+        return [
+            AudioDevice(1, "BlackHole 2ch", 2, 2),
+            AudioDevice(3, "外置麦克风", 1, 0),
+        ]
+
+    def output_devices(self) -> list[AudioDevice]:
+        return [
+            AudioDevice(2, "Teams 同传聚合", 0, 2),
+            AudioDevice(4, "外置耳机", 0, 2),
+        ]
+
+
+class VirtualDefaultWithoutPhysicalInputProbe(VirtualDefaultProbe):
+    """模拟当前 Mac mini：输入设备只有虚拟路由。"""
+
+    def input_devices(self) -> list[AudioDevice]:
+        return [
+            AudioDevice(1, "BlackHole 16ch", 16, 16),
+            AudioDevice(2, "BlackHole 2ch", 2, 2),
+        ]
+
+    def output_devices(self) -> list[AudioDevice]:
+        return [
+            AudioDevice(2, "BlackHole 2ch", 2, 2),
+            AudioDevice(4, "Mac mini扬声器", 0, 2),
+        ]
+
+
 def test_readiness_passes_only_after_teams_route_confirmation() -> None:
     """Teams 路由必须人工确认后才允许进入会议。"""
     report = ReadinessChecker(
@@ -145,6 +177,9 @@ def test_readiness_realtime_mode_allows_live_duplex_path() -> None:
     assert report.is_ready
     assert report.by_key["live_pipeline"].status is CheckStatus.PASS
     assert "tvi duplex" in report.by_key["live_pipeline"].detail
+    assert report.by_key["latency_scope"].status is CheckStatus.INFO
+    assert not report.by_key["latency_scope"].required
+    assert "只证明会议测试通路" in report.by_key["latency_scope"].detail
 
 
 def test_readiness_realtime_mode_blocks_shared_virtual_device() -> None:
@@ -174,6 +209,34 @@ def test_readiness_blocks_virtual_devices_as_mac_defaults() -> None:
     assert report.by_key["default_output"].status is CheckStatus.FAIL
     assert "真实麦克风" in report.by_key["default_input"].detail
     assert "真实耳机" in report.by_key["default_output"].detail
+
+
+def test_readiness_lists_physical_candidates_for_virtual_defaults() -> None:
+    """默认设备错误时，应列出可切换的真实输入/输出候选。"""
+    report = ReadinessChecker(
+        device_probe=VirtualDefaultWithCandidatesProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+    ).run()
+
+    assert not report.is_ready
+    assert "外置麦克风 (index=3)" in report.by_key["default_input"].next_action
+    assert "外置耳机 (index=4)" in report.by_key["default_output"].next_action
+
+
+def test_readiness_reports_empty_physical_input_candidates() -> None:
+    """没有真实输入候选时，readiness 必须直接说清楚不是单纯选错默认设备。"""
+    report = ReadinessChecker(
+        device_probe=VirtualDefaultWithoutPhysicalInputProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+    ).run()
+
+    assert not report.is_ready
+    assert "未检测到真实输入候选" in report.by_key["default_input"].next_action
+    assert "Mac mini扬声器 (index=4)" in report.by_key["default_output"].next_action
 
 
 def test_readiness_phrase_mode_allows_short_phrase_path() -> None:

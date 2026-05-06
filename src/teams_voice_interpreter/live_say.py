@@ -113,9 +113,11 @@ class LiveSayBridge:
         direction: AudioDirection,
         target: str,
         streaming: bool = False,
+        context_text: str = "",
     ) -> PreparedSayResult:
         """翻译并合成音频，但不阻塞播放。"""
         source_text = text.strip()
+        context_source_text = context_text.strip()
         if not source_text:
             raise UserFacingError(
                 code="say.empty_text",
@@ -134,7 +136,11 @@ class LiveSayBridge:
                 api_key=settings.resolved_deepseek_api_key(),
                 model=settings.deepseek_model,
                 http_client=self._resolve_deepseek_http_client(),
-            ).stream_translate(source_text, direction=direction):
+            ).stream_translate(
+                source_text,
+                direction=direction,
+                context_text=context_source_text,
+            ):
                 if not chunk.text:
                     continue
                 if mt_first_token_at is None:
@@ -142,9 +148,7 @@ class LiveSayBridge:
                 chunks.append(chunk)
 
         try:
-            await asyncio.wait_for(
-                _collect_translation(), timeout=DEEPSEEK_STREAM_BUDGET_S
-            )
+            await asyncio.wait_for(_collect_translation(), timeout=DEEPSEEK_STREAM_BUDGET_S)
         except TimeoutError as error:
             raise DeepSeekError(
                 code="mt.stream_budget_exceeded",

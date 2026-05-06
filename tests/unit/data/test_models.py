@@ -12,6 +12,7 @@ from teams_voice_interpreter.data.credential import ServiceCredential, ServiceKi
 from teams_voice_interpreter.data.glossary import GlossaryEntry
 from teams_voice_interpreter.data.latency import LatencySample, LatencyStage
 from teams_voice_interpreter.data.transcript import (
+    StableTranscriptChunk,
     TranscriptKind,
     TranscriptSegment,
     TranslationSegment,
@@ -51,6 +52,41 @@ def test_transcript_final_requires_end_time_and_text() -> None:
             text="",
             confidence=0.9,
         )
+
+
+def test_stable_transcript_chunk_separates_cumulative_text_and_delta() -> None:
+    """LocalAgreement chunk 必须区分累计全文与本次新增文本。"""
+    segment_id = uuid4()
+    chunk = StableTranscriptChunk(
+        segment_id=segment_id,
+        direction=AudioDirection.UPLINK,
+        kind=TranscriptKind.PARTIAL,
+        started_at=datetime.now(UTC),
+        text="我们今天讨论现金流",
+        delta_text="讨论现金流",
+        confidence=0.82,
+    )
+
+    assert chunk.text == "我们今天讨论现金流"
+    assert chunk.delta_text == "讨论现金流"
+
+
+def test_stable_transcript_final_revision_can_have_empty_delta() -> None:
+    """final 修正已提交前缀时，必须保留全文但不得伪造增量。"""
+    chunk = StableTranscriptChunk(
+        segment_id=uuid4(),
+        direction=AudioDirection.UPLINK,
+        kind=TranscriptKind.FINAL,
+        started_at=datetime.now(UTC),
+        ended_at=datetime.now(UTC),
+        text="今天我们讨论",
+        delta_text="",
+        confidence=0.95,
+        revision=True,
+    )
+
+    assert chunk.revision
+    assert chunk.delta_text == ""
 
 
 def test_translation_direction_controls_target_language() -> None:

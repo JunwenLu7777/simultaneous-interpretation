@@ -127,8 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     total = len(samples["首字节"])
     if total == 0:
         print(
-            "未匹配到任何 `耗时：...` 行。请确认运行时带了 `--show-latency`，"
-            "且方向过滤是否正确。",
+            "未匹配到任何 `耗时：...` 行。请确认运行时带了 `--show-latency`，且方向过滤是否正确。",
             file=sys.stderr,
         )
         return 1
