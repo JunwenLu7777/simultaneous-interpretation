@@ -2,7 +2,8 @@
 
 **日期**：2026-05-06
 **关联**：spec.md FR-007 / FR-008 / FR-013、`.specify/memory/constitution.md` 原则 IV、`specs/001-teams-voice-interpreter/contracts/whisper-cpp.md` §4-6
-**状态**：设计已确认，待 writing-plans 出实施计划
+**状态**：⛔ **暂缓（2026-05-06）** — 详见 §10 暂缓决策；spec FR-007 违约登记保留至 v1.1 重启
+**取代路径**：升级 VAD（Silero）+ Bag of Hallucinations 后过滤 + 真测 baseline 写入 perf-report.md（详见 §10）
 
 ## 1. 背景与目标
 
@@ -304,3 +305,59 @@ t=2400  ASR final "我们今天，讨论一下，产品的延期问题"
 | 2026-05-06 | 选「折中」commit 策略 | 激进会议场景不可用、保守不算流式 |
 | 2026-05-06 | 选 a whisper.cpp `stream` subprocess | spec / contracts 期望路径，KV cache 复用 CPU 友好 |
 | 2026-05-06 | 选 3 sentence-boundary commit + DeepSeek prefix caching 实测 | 每个 commit 独立翻译质量稳定，prefix caching 实测决定后续 |
+| 2026-05-06 | ⛔ **暂缓 partial/sliding 整体方案** | 见 §10 |
+
+## 10. 暂缓决策（2026-05-06）
+
+### 10.1 触发原因
+
+设计走完后由 Codex 对抗审查 + 业界开源调研同时暴露三条根本问题：
+
+1. **Codex P0-1**：`contracts/whisper-cpp.md §4-6` 的 `feed_audio / consume / close_segment` JSON Lines 协议是**项目自己设计但未实现**的契约，不是上游 whisper.cpp `stream` binary 的能力 — 该 binary 实际是 SDL 麦克风示例，从麦克风读音频，输出文本到 stdout，不接受 stdin JSON 帧。原方案 §4.7「拉预编译二进制」走不通。
+2. **Codex P0-2**：原 §5.2 场景 B「退化到 VAD final」违反 spec FR-008（不得在 STT final 之前阻塞翻译队列）和 FR-013（连续长语音每 30 秒滚动封口），是直接的规约违约而非已知边界。
+3. **业界调研结论**：Whisper 训练集片尾幻觉（"请订阅 / 字幕组 / Thanks for watching"）是**确定性高置信输出** — sliding 重复推理 + LocalAgreement-N **治不住**。重跑同一段静音仍吐相同文本，algorithm 会判定其稳定 → commit。原 §1.3「sliding 天然过滤幻觉」承诺站不住。
+
+### 10.2 业界对照
+
+| 项目 | star | 实时同传策略 | 处理幻觉 |
+|---|---|---|---|
+| RealtimeSTT (KoljaB) | 9.8k（业界最活跃生产级） | **主动放弃** LocalAgreement / sliding，VAD-batch one-shot | Silero VAD + 能量门槛 |
+| whisper_streaming (UFAL Macháček et al) | 3.6k | LocalAgreement-2 + faster-whisper | 论文实测中文/日文 compression_ratio 误杀严重 |
+| WhisperLiveKit (QuentinFuxa) | 7.3k | Simul-Whisper / AlignAtt + LocalAgreement 可切换 | 200 语言但无中文专项 |
+| SimulStreaming (UFAL 继任) | 新项目 | AlignAtt（attention 驱动） | IWSLT 2025 同传冠军，2-4 s 档 |
+
+**RealtimeSTT 9.8k stars 业界最活跃项目主动放弃 partial/sliding** — 与本设计推断的暂缓路径一致。理由（直接引用其文档）：sliding 治不住高置信确定性幻觉 + 中文短帧改写率高 + 字幕跳动比延迟更伤用户。
+
+### 10.3 取代路径（v1 实际走的方向）
+
+**不做 partial/sliding**，转向三件独立可发布的小 PR：
+
+**a. Silero VAD（ONNX 版本）替换 webrtcvad** — 论文 arxiv 2501.11378 实测把 Whisper 幻觉率从 40.3% 压到 0.2%；ONNX 版本依赖 onnxruntime ~50 MB（不是 PyTorch 500 MB，与 research.md §5「轻量初衷」可调和）；这一项单独就能让 small-q5_1 模型重新可用，把 ASR 时间从 large-v3-q5_0 的 2.3 s 砍到 0.5-0.8 s。
+
+**b. Bag of Hallucinations 后过滤** — 用 Aho-Corasick 算法 + Hugging Face 公开数据集 `sachaarbonel/whisper-hallucinations`，多捕获 67% 漏网幻觉。替换现有手写 `HALLUCINATION_PREFIX_PATTERNS`。
+
+**c. 真测 baseline 写入 perf-report.md** — 把今天 5 轮真钉钉通话的 27 段 latency 数据替换 `tests/perf/test_first_segment_latency.py` 等硬编码 fixture（commit `6bf1581` 已积累原始数据）。
+
+预期端到端首字节 p95 从 ~3 s 压到 ≤ 1.5 s（与 SimulStreaming 2-4 s 档差距已小，且稳定性高）。spec FR-007 partial 违约**保留登记**到 plan.md 复杂度追踪，交给 v1.1 处理。
+
+### 10.4 v1.1 重启 partial/sliding 的条件
+
+本文档（§1-9）的设计仍作为未来工程基础。任一以下条件成立时可重启：
+
+- a + b + c 落地后真测端到端首字节 p95 仍 > 1.5 s 且无其它优化空间
+- Moonshine 中文模型在 ARM Mac 上跑通且推理速度 ≥ Whisper Tiny 的 2× — 可直接走 sliding 而不必担心 CPU
+- whisper.cpp 上游真支持 incremental decode + KV cache 跨 step 复用（当前不支持）
+- 业界出现 Whisper 训练集片尾确定性幻觉的有效解（如 Calm-Whisper 微调放出中文版）
+
+**触发条件之一时**，本文档 §3-7 的设计（带 §10 决策修订）作为新 brainstorming 起点。
+
+### 10.5 调研引用
+
+- [whisper_streaming (UFAL)](https://github.com/ufal/whisper_streaming)
+- [SimulStreaming (UFAL, IWSLT 2025)](https://github.com/ufal/SimulStreaming)
+- [WhisperLiveKit (QuentinFuxa)](https://github.com/QuentinFuxa/WhisperLiveKit)
+- [RealtimeSTT (KoljaB)](https://github.com/KoljaB/RealtimeSTT)
+- [Moonshine (moonshine-ai)](https://github.com/moonshine-ai/moonshine)
+- [Investigation of Whisper ASR Hallucinations Induced by Non-Speech Audio (arxiv 2501.11378)](https://arxiv.org/html/2501.11378v1)
+- [Turning Whisper into Real-Time Transcription System (arxiv 2307.14743)](https://arxiv.org/html/2307.14743)
+- [whisper-hallucinations dataset (Hugging Face)](https://huggingface.co/datasets/sachaarbonel/whisper-hallucinations)
