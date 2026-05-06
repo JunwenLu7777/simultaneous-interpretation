@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.cli import app as cli_app
 from teams_voice_interpreter.data.audio_segment import AudioDirection
+from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.live_say import PreparedSayResult, SayResult
 from teams_voice_interpreter.stt.whisper_streaming import OnlineASRProcessor, WhisperStreamingConfig
 
@@ -149,6 +150,27 @@ def test_duplex_rejects_online_asr_early_prepare_without_online_asr() -> None:
 
     assert result.exit_code == 1
     assert "必须同时启用 `--online-asr`" in result.output
+
+
+def test_duplex_prints_route_errors_before_exit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """duplex 路由探测失败时也必须输出两段式提示，而不是静默带异常退出。"""
+
+    def fail_route(*, allow_shared_virtual_device: bool) -> cli_app._DuplexRoute:
+        del allow_shared_virtual_device
+        raise UserFacingError(
+            code="audio.route_missing",
+            what_happened="发生了什么：没有找到下行虚拟设备。",
+            next_action="下一步如何做：请先配置 BlackHole 16ch。",
+        )
+
+    monkeypatch.setattr(cli_app, "_duplex_route", fail_route)
+
+    result = runner.invoke(cli_app.app, ["duplex", "--chunks", "1"])
+
+    assert result.exit_code == 1
+    assert "发生了什么：没有找到下行虚拟设备。" in result.output
+    assert "下一步如何做：请先配置 BlackHole 16ch。" in result.output
+    assert result.exception is not None
 
 
 def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # type: ignore[no-untyped-def]

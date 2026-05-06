@@ -332,11 +332,11 @@ def duplex(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
         )
+        route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
     except UserFacingError as error:
         typer.echo(str(error))
         raise typer.Exit(1) from error
     errors: queue.Queue[BaseException] = queue.Queue()
-    route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
     playback_gate: _PlaybackGate | None = _PlaybackGate() if route.shared_virtual_device else None
     typer.echo("正在加载两路 Whisper 模型；加载完成后会开始双向监听。")
     typer.echo(f"上行输出设备：{route.uplink_device.name}")
