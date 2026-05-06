@@ -275,6 +275,7 @@ def listen(
     show_latency: bool = SHOW_LATENCY_CLI_OPTION,
     online_asr: bool = ONLINE_ASR_CLI_OPTION,
     online_asr_early_prepare: bool = ONLINE_ASR_EARLY_PREPARE_CLI_OPTION,
+    low_latency_proof: Path | None = LOW_LATENCY_PROOF_CLI_OPTION,
     target: str = typer.Option(
         "blackhole",
         "--target",
@@ -287,6 +288,7 @@ def listen(
         _validate_online_asr_options(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
+            low_latency_proof=low_latency_proof,
         )
         direction = _direction_for_target(target, direction_option=direction_option)
         typer.echo("正在加载 Whisper 模型；加载完成后会开始连续监听。")
@@ -331,6 +333,7 @@ def duplex(
     show_latency: bool = SHOW_LATENCY_CLI_OPTION,
     online_asr: bool = ONLINE_ASR_CLI_OPTION,
     online_asr_early_prepare: bool = ONLINE_ASR_EARLY_PREPARE_CLI_OPTION,
+    low_latency_proof: Path | None = LOW_LATENCY_PROOF_CLI_OPTION,
     allow_shared_virtual_device: bool = typer.Option(
         False,
         "--allow-shared-virtual-device",
@@ -342,6 +345,7 @@ def duplex(
         _validate_online_asr_options(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
+            low_latency_proof=low_latency_proof,
         )
         route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
     except UserFacingError as error:
@@ -643,7 +647,12 @@ def main() -> None:
     app()
 
 
-def _validate_online_asr_options(*, online_asr: bool, online_asr_early_prepare: bool) -> None:
+def _validate_online_asr_options(
+    *,
+    online_asr: bool,
+    online_asr_early_prepare: bool,
+    low_latency_proof: Path | None = None,
+) -> None:
     if online_asr_early_prepare and not online_asr:
         raise UserFacingError(
             code="online_asr.early_prepare_requires_online_asr",
@@ -656,6 +665,28 @@ def _validate_online_asr_options(*, online_asr: bool, online_asr_early_prepare: 
                 "`--online-asr-early-prepare` 使用默认整段 ASR。"
             ),
         )
+    if not online_asr_early_prepare:
+        return
+    if low_latency_proof is None:
+        raise UserFacingError(
+            code="online_asr.early_prepare_requires_low_latency_proof",
+            what_happened=(
+                "发生了什么：`--online-asr-early-prepare` 会让 stable partial "
+                "提前调用 MT/TTS，但当前没有提供已通过的低延迟 proof。"
+            ),
+            next_action=(
+                "下一步如何做：请先运行 `scripts/probe_online_asr.py --proof-json <path>`，"
+                "再加上 `--low-latency-proof <path>`；或删除 `--online-asr-early-prepare`。"
+            ),
+        )
+    proof = _read_low_latency_proof(low_latency_proof)
+    if proof is None or proof.verified:
+        return
+    raise UserFacingError(
+        code="online_asr.early_prepare_low_latency_proof_failed",
+        what_happened=f"发生了什么：{proof.detail}",
+        next_action=proof.next_action,
+    )
 
 
 def _build_vad_backend() -> VadBackendProtocol:

@@ -83,7 +83,8 @@ tvi duplex --online-asr --chunks 5 --show-latency
 | `--speech-rms-threshold FLOAT` | `180.0` | 判定有效人声的 RMS 阈值。环境噪声高时可调大，识别不触发时可调小。 |
 | `--show-latency / --hide-latency` | `--show-latency` | 是否打印每段延迟剖面。真测时建议保持开启。 |
 | `--online-asr / --segment-asr` | `--segment-asr` | 实验模式开关。启用后持续喂音频 chunk 产生稳定 partial；默认仍使用整段 ASR，避免未经真测的高频 Whisper 重跑影响准确率或 CPU。 |
-| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关，必须和 `--online-asr` 同时使用。只有先用 `scripts/probe_online_asr.py` 证明 final 可确认 partial 达标后，才建议启用；否则 partial 不会提前调用 MT/TTS。 |
+| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关，必须和 `--online-asr` 以及已通过的 `--low-latency-proof` 同时使用；否则 partial 不会提前调用 MT/TTS。 |
+| `--low-latency-proof PATH` | 无 | 读取 `scripts/probe_online_asr.py --proof-json` 生成的 proof；仅在启用 `--online-asr-early-prepare` 时用于阻断未验证 partial。 |
 | `--allow-shared-virtual-device` | 关闭 | 仅临时测试用，允许上行输出和下行输入使用同一个虚拟设备。正式会议不建议启用。 |
 
 ### 单向连续监听：`tvi listen`
@@ -111,6 +112,7 @@ tvi listen --online-asr --target default --direction uplink --chunks 3
 | `--show-latency / --hide-latency` | `--show-latency` | 同 `duplex`。 |
 | `--online-asr / --segment-asr` | `--segment-asr` | 同 `duplex`。 |
 | `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 同 `duplex`。 |
+| `--low-latency-proof PATH` | 无 | 同 `duplex`。 |
 
 ### 短句发声测试：`tvi say`
 
@@ -259,7 +261,7 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 - ASR 仍是 VAD 收段后的整段 Whisper.cpp 识别，常见 1.25-2.30 秒。
 - Edge-TTS 首写常见 1.6-2.0 秒。
 - 已新增 LocalAgreement 稳定增量边界和 `--online-asr` 实验入口：累计全文、增量 `delta_text` 与 final 修正标记分离；真实 pywhispercpp `new_segment_callback` 在 one-shot 模式下接近 final 时才触发，因此默认 `listen` / `duplex` 路径仍是 VAD 收段 + 6 秒兜底强制切段 + overlap 保守去重。
-- 当前 `--online-asr` 通过高频重跑本地 Whisper one-shot 模拟 partial。默认不会让 partial 提前调用 MT/TTS，避免未确认文本消耗外部调用；只有显式加 `--online-asr-early-prepare` 才会启用提前准备。
+- 当前 `--online-asr` 通过高频重跑本地 Whisper one-shot 模拟 partial。默认不会让 partial 提前调用 MT/TTS，避免未确认文本消耗外部调用；只有显式加 `--online-asr-early-prepare --low-latency-proof <path>` 且 proof 通过复核，才会启用提前准备。
 - 探针会按「final 可确认的可翻译 stable partial」判定真实收益，并把实时音频到达下界计入 partial 时间；若该指标为 `n/a`，说明提前准备的 partial 会被 final 修正取消，实际不会降低首段播出延迟。
 - 播放积压超过内部阈值时，实时路径会整句级清理跨 burst 旧段；同一长句被强制切段形成的同 burst 片段仍按顺序保留，避免中段丢失。
 - 若要继续压低延迟，需要引入真正的 sliding / partial ASR 引擎，而不是只依赖 pywhispercpp one-shot callback。

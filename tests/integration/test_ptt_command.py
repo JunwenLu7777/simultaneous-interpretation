@@ -1,5 +1,7 @@
 """tvi ptt push-to-talk 命令测试。"""
 
+import json
+
 import numpy as np
 from typer.testing import CliRunner
 
@@ -31,6 +33,26 @@ def _speech_frames(count: int, *, amplitude: int = 1000):
 def _silence_frames(count: int):
     for _ in range(count):
         yield np.zeros(480, dtype=np.int16)
+
+
+def _write_valid_low_latency_proof(tmp_path) -> str:  # type: ignore[no-untyped-def]
+    proof_path = tmp_path / "online-asr-proof.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": True,
+                "failures": [],
+                "thresholds": {"max_first_partial_s": 1.2, "max_cer": 0.1},
+                "metrics": {
+                    "first_confirmed_ready_partial_s": 0.8,
+                    "cer": 0.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(proof_path)
 
 
 def test_ptt_command_invokes_push_to_talk_bridge(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -150,6 +172,79 @@ def test_duplex_rejects_online_asr_early_prepare_without_online_asr() -> None:
 
     assert result.exit_code == 1
     assert "必须同时启用 `--online-asr`" in result.output
+
+
+def test_listen_rejects_online_asr_early_prepare_without_low_latency_proof() -> None:
+    """early prepare 必须绑定已通过的低延迟 proof，不能只靠 online-asr 开关放行。"""
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "没有提供已通过的低延迟 proof" in result.output
+    assert "--low-latency-proof" in result.output
+
+
+def test_duplex_rejects_online_asr_early_prepare_without_low_latency_proof() -> None:
+    """duplex 的 early prepare 同样必须先过 proof 门禁。"""
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "duplex",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "没有提供已通过的低延迟 proof" in result.output
+    assert "--low-latency-proof" in result.output
+
+
+def test_listen_rejects_failed_low_latency_proof_for_early_prepare(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """proof 内容未通过时，listen 不得启用 partial 提前准备。"""
+    proof_path = tmp_path / "online-asr-proof.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": True,
+                "failures": [],
+                "thresholds": {"max_first_partial_s": 1.2, "max_cer": 0.1},
+                "metrics": {
+                    "first_confirmed_ready_partial_s": 1.5,
+                    "cer": 0.25,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--low-latency-proof",
+            str(proof_path),
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "低延迟 proof 未通过" in result.output
+    assert "CER 0.250 > 0.100" in result.output
 
 
 def test_duplex_prints_route_errors_before_exit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -286,7 +381,7 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
     assert "How are you? I am 30. Do you love me?" in result.output
 
 
-def test_listen_command_online_asr_prepares_stable_partial(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_listen_command_online_asr_prepares_stable_partial(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     """显式开启 early-prepare 后，online-asr 才能在 VAD final 前准备稳定 partial。"""
     prepared_sources: list[str] = []
     prepare_contexts: list[str] = []
@@ -357,6 +452,7 @@ def test_listen_command_online_asr_prepares_stable_partial(monkeypatch) -> None:
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
     monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
     monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
+    proof_path = _write_valid_low_latency_proof(tmp_path)
 
     result = runner.invoke(
         cli_app.app,
@@ -364,6 +460,8 @@ def test_listen_command_online_asr_prepares_stable_partial(monkeypatch) -> None:
             "listen",
             "--online-asr",
             "--online-asr-early-prepare",
+            "--low-latency-proof",
+            proof_path,
             "--chunks",
             "1",
             "--end-silence-ms",
@@ -483,6 +581,7 @@ def test_listen_command_online_asr_does_not_prepare_partials_by_default(monkeypa
 
 def test_listen_command_online_asr_reuses_stable_suffix_after_forced_split(
     monkeypatch,
+    tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     """强切续段被 overlap 去重后，仍应复用已 final 确认的 stable suffix prepare。"""
     prepared_sources: list[str] = []
@@ -566,6 +665,7 @@ def test_listen_command_online_asr_reuses_stable_suffix_after_forced_split(
             config=WhisperStreamingConfig(step_ms=30),
         ),
     )
+    proof_path = _write_valid_low_latency_proof(tmp_path)
 
     result = runner.invoke(
         cli_app.app,
@@ -573,6 +673,8 @@ def test_listen_command_online_asr_reuses_stable_suffix_after_forced_split(
             "listen",
             "--online-asr",
             "--online-asr-early-prepare",
+            "--low-latency-proof",
+            proof_path,
             "--chunks",
             "2",
             "--chunk-seconds",
