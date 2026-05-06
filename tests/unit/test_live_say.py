@@ -179,6 +179,119 @@ def test_synthesize_with_retry_does_not_retry_on_other_errors(monkeypatch) -> No
     assert len(factory_calls) == 1
 
 
+def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """实时 streaming 路径必须给 Edge-TTS 留一次重试，避免短句空音频段被直接丢弃。"""
+    captured: dict[str, object] = {}
+
+    class _FakeDeepSeek:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction
+            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="completed", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _fake_pcm() -> AsyncIterator[np.ndarray]:
+        if False:  # pragma: no cover - empty async iterator for spy
+            yield np.array([], dtype=np.int16)
+
+    def _spy(**kwargs: object) -> AsyncIterator[np.ndarray]:
+        captured.update(kwargs)
+        return _fake_pcm()
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "start_pcm_stream_with_retry", _spy)
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    asyncio.run(
+        bridge.prepare(
+            "你好",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+
+    assert captured["max_retries"] == 1
+
+
+def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """多次 prepare 必须复用同一个 httpx.AsyncClient，省掉每次 DeepSeek 调用的 TLS 握手。"""
+    captured_http_clients: list[object] = []
+
+    class _FakeDeepSeek:
+        def __init__(self, *args: object, http_client: object = None, **kwargs: object) -> None:
+            del args, kwargs
+            captured_http_clients.append(http_client)
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction
+            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="completed", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _fake_pcm() -> AsyncIterator[np.ndarray]:
+        if False:  # pragma: no cover - empty async iterator for spy
+            yield np.array([], dtype=np.int16)
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "start_pcm_stream_with_retry", lambda **_: _fake_pcm())
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    asyncio.run(
+        bridge.prepare(
+            "你好",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+    asyncio.run(
+        bridge.prepare(
+            "再见",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+
+    assert len(captured_http_clients) == 2
+    assert captured_http_clients[0] is not None
+    assert captured_http_clients[0] is captured_http_clients[1]
+
+
 def test_play_prepared_streaming_feeds_pcm_iterator_to_streaming_sink(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """流式播放路径必须逐块 feed PCM，并在结束后 flush_and_close。"""
     sink = _FakeStreamingSink(device_index=1, sample_rate_hz=16000)

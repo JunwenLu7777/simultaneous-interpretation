@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
+import httpx
 import numpy as np
 import numpy.typing as npt
 
@@ -47,6 +48,7 @@ class SayResult:
     bytes_written: int
     target_device_name: str
     translation_latency_s: float = 0.0
+    mt_first_token_latency_s: float = 0.0
     tts_latency_s: float = 0.0
     decode_latency_s: float = 0.0
     playback_latency_s: float = 0.0
@@ -68,6 +70,7 @@ class PreparedSayResult:
     decode_latency_s: float
     pcm: Int16Array
     pcm_iterator: AsyncIterator[Int16Array] | None = None
+    mt_first_token_latency_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,15 @@ class LiveSayBridge:
 
     def __init__(self, *, device_probe: AudioDeviceProbe | None = None) -> None:
         self.device_probe = device_probe or AudioDeviceProbe()
+        self._deepseek_http_client: httpx.AsyncClient | None = None
+
+    def _resolve_deepseek_http_client(self) -> httpx.AsyncClient:
+        """Lazy 创建并复用 httpx.AsyncClient，避免每段译音重做 DNS/TLS 握手。"""
+        client = getattr(self, "_deepseek_http_client", None)
+        if client is None:
+            client = httpx.AsyncClient(timeout=30.0)
+            self._deepseek_http_client = client
+        return client
 
     async def say(
         self,
@@ -112,15 +124,22 @@ class LiveSayBridge:
         target_device = self._target_device(target)
         settings = load_settings(validate_credentials=True)
         translation_started = time.perf_counter()
-        chunks = [
-            chunk
-            async for chunk in DeepSeekStreamingClient(
-                api_key=settings.resolved_deepseek_api_key(),
-                model=settings.deepseek_model,
-            ).stream_translate(source_text, direction=direction)
-            if chunk.text
-        ]
+        chunks: list[TranslationChunk] = []
+        mt_first_token_at: float | None = None
+        async for chunk in DeepSeekStreamingClient(
+            api_key=settings.resolved_deepseek_api_key(),
+            model=settings.deepseek_model,
+            http_client=self._resolve_deepseek_http_client(),
+        ).stream_translate(source_text, direction=direction):
+            if not chunk.text:
+                continue
+            if mt_first_token_at is None:
+                mt_first_token_at = time.perf_counter()
+            chunks.append(chunk)
         translated_at = time.perf_counter()
+        mt_first_token_latency_s = (
+            mt_first_token_at - translation_started if mt_first_token_at is not None else 0.0
+        )
         target_text = _target_text_from_chunks(chunks)
         if not target_text:
             raise UserFacingError(
@@ -135,6 +154,7 @@ class LiveSayBridge:
                 target_device=target_device,
                 target=target,
                 translation_latency_s=translated_at - translation_started,
+                mt_first_token_latency_s=mt_first_token_latency_s,
                 tts_latency_s=0.0,
                 decode_latency_s=0.0,
                 pcm=np.array([], dtype=np.int16),
@@ -142,7 +162,7 @@ class LiveSayBridge:
                     target_text=target_text,
                     direction=direction,
                     rate=settings.tts_rate,
-                    max_retries=0,
+                    max_retries=1,
                     first_byte_timeout_s=REALTIME_TTS_FIRST_BYTE_TIMEOUT_S,
                     synthesis_timeout_s=REALTIME_TTS_SYNTHESIS_TIMEOUT_S,
                 ),
@@ -163,6 +183,7 @@ class LiveSayBridge:
             target_device=target_device,
             target=target,
             translation_latency_s=translated_at - translation_started,
+            mt_first_token_latency_s=mt_first_token_latency_s,
             tts_latency_s=tts_completed_at - tts_started,
             decode_latency_s=decoded_at - tts_completed_at,
             pcm=pcm,
@@ -236,6 +257,7 @@ class LiveSayBridge:
             bytes_written=bytes_written,
             target_device_name=prepared.target_device.name,
             translation_latency_s=prepared.translation_latency_s,
+            mt_first_token_latency_s=prepared.mt_first_token_latency_s,
             tts_latency_s=prepared.tts_latency_s,
             decode_latency_s=prepared.decode_latency_s,
             playback_latency_s=played_at - playback_started,
@@ -273,6 +295,7 @@ class LiveSayBridge:
             bytes_written=sink.bytes_written,
             target_device_name=prepared.target_device.name,
             translation_latency_s=prepared.translation_latency_s,
+            mt_first_token_latency_s=prepared.mt_first_token_latency_s,
             tts_latency_s=prepared.tts_latency_s,
             decode_latency_s=prepared.decode_latency_s,
             playback_latency_s=played_at - playback_started,

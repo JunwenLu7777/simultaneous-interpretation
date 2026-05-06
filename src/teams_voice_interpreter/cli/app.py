@@ -49,12 +49,12 @@ CHUNKS_CLI_OPTION = typer.Option(
     help="最多处理多少个分片；不传则持续监听直到 Ctrl+C。",
 )
 END_SILENCE_MS_CLI_OPTION = typer.Option(
-    500,
+    280,
     "--end-silence-ms",
     help="检测到人声后，尾部静音多少毫秒即收段。",
 )
 MIN_SPEECH_MS_CLI_OPTION = typer.Option(
-    450,
+    300,
     "--min-speech-ms",
     help="少于该时长的人声片段会被当作噪声丢弃。",
 )
@@ -566,25 +566,30 @@ def _listen_worker(
     playback_gate: _PlaybackGate | None,
 ) -> None:
     """后台处理 ASR / 翻译 / 合成，避免阻塞继续采集。"""
-    while True:
-        item = segment_queue.get()
-        try:
-            if item is None:
-                return
-            index, samples = item
-            _prepare_listen_segment(
-                index=index,
-                samples=samples,
-                playback_queue=playback_queue,
-                bridge=bridge,
-                direction=direction,
-                target=target,
-                label=label,
-                show_latency=show_latency,
-                playback_gate=playback_gate,
-            )
-        finally:
-            segment_queue.task_done()
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            item = segment_queue.get()
+            try:
+                if item is None:
+                    return
+                index, samples = item
+                _prepare_listen_segment(
+                    index=index,
+                    samples=samples,
+                    playback_queue=playback_queue,
+                    bridge=bridge,
+                    direction=direction,
+                    target=target,
+                    label=label,
+                    show_latency=show_latency,
+                    playback_gate=playback_gate,
+                    loop=loop,
+                )
+            finally:
+                segment_queue.task_done()
+    finally:
+        loop.close()
 
 
 @dataclass(frozen=True)
@@ -613,6 +618,7 @@ def _prepare_listen_segment(
     label: str,
     show_latency: bool,
     playback_gate: _PlaybackGate | None,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
     started = time.perf_counter()
     display_index = _display_index(label, index)
@@ -632,13 +638,16 @@ def _prepare_listen_segment(
     transcribed_at = time.perf_counter()
     typer.echo(f"{display_index} 识别：{text}")
     try:
-        prepared = asyncio.run(
-            bridge.say_bridge.prepare(
-                text,
-                direction=direction,
-                target=target,
-                streaming=True,
-            )
+        prepare_coro = bridge.say_bridge.prepare(
+            text,
+            direction=direction,
+            target=target,
+            streaming=True,
+        )
+        prepared = (
+            loop.run_until_complete(prepare_coro)
+            if loop is not None
+            else asyncio.run(prepare_coro)
         )
     except UserFacingError as error:
         typer.echo(f"{display_index} {error}")
@@ -768,7 +777,8 @@ def _print_listen_latency(
     typer.echo(
         f"{_display_index(item.label, item.index)} "
         f"耗时：ASR {item.transcribed_at - item.started:.2f}s / "
-        f"MT {result.translation_latency_s:.2f}s / prepare墙钟 {prepare_wall_s:.2f}s / "
+        f"MT首T {result.mt_first_token_latency_s:.2f}s / "
+        f"MT总 {result.translation_latency_s:.2f}s / prepare墙钟 {prepare_wall_s:.2f}s / "
         f"TTS {result.tts_latency_s:.2f}s / 解码 {result.decode_latency_s:.2f}s / "
         f"排队 {queue_wait_s:.2f}s"
         f"(q={item.queue_depth_at_enqueue},drop={item.dropped_pending_before_enqueue}) / "
