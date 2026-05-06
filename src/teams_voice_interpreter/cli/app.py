@@ -28,6 +28,11 @@ from teams_voice_interpreter.live_ptt import (
 from teams_voice_interpreter.live_say import LiveSayBridge, PreparedSayResult, SayResult
 from teams_voice_interpreter.readiness import CheckStatus, ReadinessChecker, ReadinessReport
 from teams_voice_interpreter.session.manager import DEFAULT_MANAGER
+from teams_voice_interpreter.stt.vad import (
+    SileroBackend,
+    VadBackendProtocol,
+    WebRtcBackend,
+)
 from teams_voice_interpreter.tts.audio_decode import warm_up_pyav_decoder
 
 app = typer.Typer(help="Teams 双向实时语音同传桥")
@@ -336,6 +341,8 @@ def wizard(
         uplink_virtual_device_name=settings.uplink_virtual_device_name,
         downlink_virtual_device_name=settings.downlink_virtual_device_name,
         allow_shared_virtual_device=settings.allow_shared_virtual_device,
+        vad_backend=settings.vad_backend,
+        silero_vad_model_path=settings.silero_vad_model_path(),
         mode="phrase",
     ).run()
     _print_readiness_report(report)
@@ -376,6 +383,8 @@ def doctor(
         uplink_virtual_device_name=settings.uplink_virtual_device_name,
         downlink_virtual_device_name=settings.downlink_virtual_device_name,
         allow_shared_virtual_device=settings.allow_shared_virtual_device,
+        vad_backend=settings.vad_backend,
+        silero_vad_model_path=settings.silero_vad_model_path(),
         mode=doctor_mode,
     ).run()
     _print_readiness_report(report)
@@ -396,6 +405,14 @@ def serve(
 def main() -> None:
     """运行命令行入口。"""
     app()
+
+
+def _build_vad_backend() -> VadBackendProtocol:
+    """按 settings.vad_backend 创建 VAD 后端实例；每个 pipeline 独立一份避免线程间 state 串扰。"""
+    settings = load_settings(validate_credentials=False)
+    if settings.vad_backend == "silero":
+        return SileroBackend(model_path=settings.silero_vad_model_path())
+    return WebRtcBackend()
 
 
 class _PlaybackGate:
@@ -506,6 +523,7 @@ def _run_listen_pipeline(
             overlap_seconds=overlap_seconds,
             rms_threshold=speech_rms_threshold,
             max_segments=chunks,
+            vad_backend=_build_vad_backend(),
         ),
         start=1,
     ):

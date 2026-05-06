@@ -112,6 +112,7 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
             overlap_seconds: float,
             rms_threshold: float,
             max_segments: int | None,
+            vad_backend: object = None,
         ):
             captured["max_segment_seconds"] = max_segment_seconds
             captured["end_silence_ms"] = end_silence_ms
@@ -119,6 +120,7 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
             captured["overlap_seconds"] = overlap_seconds
             captured["rms_threshold"] = rms_threshold
             captured["max_segments"] = max_segments
+            captured["vad_backend"] = vad_backend
             yield object()
 
     class FakeTranscriber:
@@ -230,6 +232,7 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
             overlap_seconds: float,
             rms_threshold: float,
             max_segments: int | None,
+            vad_backend: object = None,
         ):
             del (
                 max_segment_seconds,
@@ -238,6 +241,7 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
                 overlap_seconds,
                 rms_threshold,
                 max_segments,
+                vad_backend,
             )
             yield np.ones(160, dtype=np.int16)
 

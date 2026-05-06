@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     uplink_virtual_device_name: str = "BlackHole 2ch"
     downlink_virtual_device_name: str = ""
     allow_shared_virtual_device: bool = False
+    vad_backend: Literal["silero", "webrtc"] = "silero"
 
     def resolved_deepseek_api_key(self) -> str:
         """返回最终使用的 DeepSeek API Key，进程环境变量优先于 config 文件。"""
@@ -45,6 +46,10 @@ class Settings(BaseSettings):
     def resolved_downlink_virtual_device_name(self) -> str:
         """返回下行捕获使用的虚拟设备名；未配置时回落到上行设备名。"""
         return self.downlink_virtual_device_name or self.uplink_virtual_device_name
+
+    def silero_vad_model_path(self) -> Path:
+        """返回 Silero VAD ONNX 模型缓存路径。"""
+        return Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
 
 
 def load_settings(

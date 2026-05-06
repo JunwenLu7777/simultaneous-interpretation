@@ -221,3 +221,53 @@ def test_readiness_reports_pyav_unavailable(monkeypatch) -> None:  # type: ignor
     assert report.by_key["pyav"].status is CheckStatus.FAIL
     assert "pyav.unavailable" in report.by_key["pyav"].detail
     assert "uv sync" in report.by_key["pyav"].next_action
+
+
+def test_readiness_silero_check_skipped_for_webrtc_backend(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """vad_backend=webrtc 时 silero 检查必须跳过为 PASS。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        vad_backend="webrtc",
+        silero_vad_model_path=tmp_path / "absent.onnx",
+    ).run()
+
+    assert report.by_key["silero_vad"].status is CheckStatus.PASS
+    assert "vad_backend=webrtc" in report.by_key["silero_vad"].detail
+
+
+def test_readiness_silero_check_fails_when_model_missing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """silero 模式下模型文件缺失必须 FAIL 并指向 install 脚本。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        vad_backend="silero",
+        silero_vad_model_path=tmp_path / "missing.onnx",
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["silero_vad"].status is CheckStatus.FAIL
+    assert "scripts/install-silero-vad.sh" in report.by_key["silero_vad"].next_action
+
+
+def test_readiness_silero_check_fails_on_sha_mismatch(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """silero 模式下 SHA256 不匹配必须 FAIL 并要求重新运行 install 脚本。"""
+    fake_model = tmp_path / "silero_vad.onnx"
+    fake_model.write_bytes(b"corrupted")
+
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        vad_backend="silero",
+        silero_vad_model_path=fake_model,
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["silero_vad"].status is CheckStatus.FAIL
+    assert "SHA256 不匹配" in report.by_key["silero_vad"].detail

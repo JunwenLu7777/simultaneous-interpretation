@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import os
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from io import BytesIO
+from pathlib import Path
 from typing import Literal, Protocol
 
 import numpy as np
@@ -18,6 +21,13 @@ from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.tts.edge_tts_client import DEFAULT_VOICES, EdgeTTSClient
+
+_EXPECTED_SILERO_SHA256 = (
+    "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
+)
+_DEFAULT_SILERO_VAD_MODEL_PATH = (
+    Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
+)
 
 
 class DeviceProbe(Protocol):
@@ -98,6 +108,8 @@ class ReadinessChecker:
     uplink_virtual_device_name: str = "BlackHole 2ch"
     downlink_virtual_device_name: str = ""
     allow_shared_virtual_device: bool = False
+    vad_backend: Literal["silero", "webrtc"] = "silero"
+    silero_vad_model_path: Path = _DEFAULT_SILERO_VAD_MODEL_PATH
 
     def run(self) -> ReadinessReport:
         """执行全部阻断性检查。"""
@@ -111,6 +123,7 @@ class ReadinessChecker:
                 self._edge_tts_voice_check(),
                 self._afconvert_check(),
                 self._pyav_check(),
+                self._silero_vad_check(),
                 self._blackhole_write_dry_run_check(),
                 self._blackhole_read_dry_run_check(),
                 self._teams_route_check(),
@@ -273,6 +286,42 @@ class ReadinessChecker:
                 "下一步如何做：请运行 `uv sync --extra dev` 安装 PyAV 后重试。",
             )
         return self._pass("pyav", "PyAV 流式 MP3 解码器", "可导入并解码最小 MP3")
+
+    def _silero_vad_check(self) -> ReadinessCheck:
+        if self.vad_backend != "silero":
+            return self._pass(
+                "silero_vad",
+                "Silero VAD ONNX",
+                f"vad_backend={self.vad_backend}，跳过检查",
+            )
+        if importlib.util.find_spec("onnxruntime") is None:
+            return self._fail(
+                "silero_vad",
+                "Silero VAD ONNX",
+                "onnxruntime 未安装",
+                "下一步如何做：请运行 `uv sync --extra dev` 安装依赖后重试。",
+            )
+        model_path = self.silero_vad_model_path
+        if not model_path.exists():
+            return self._fail(
+                "silero_vad",
+                "Silero VAD ONNX",
+                f"silero_vad.onnx 不存在：{model_path}",
+                "下一步如何做：请运行 `bash scripts/install-silero-vad.sh` 下载并校验模型。",
+            )
+        actual_sha256 = _sha256_of_file(model_path)
+        if actual_sha256 != _EXPECTED_SILERO_SHA256:
+            return self._fail(
+                "silero_vad",
+                "Silero VAD ONNX",
+                f"模型 SHA256 不匹配（实际 {actual_sha256[:8]}…）",
+                "下一步如何做：请重跑 `bash scripts/install-silero-vad.sh` 重新下载并校验。",
+            )
+        return self._pass(
+            "silero_vad",
+            "Silero VAD ONNX",
+            f"已就位（{model_path.name}，SHA256 锁定匹配）",
+        )
 
     def _blackhole_write_dry_run_check(self) -> ReadinessCheck:
         sink = InMemoryAudioSink()
@@ -446,3 +495,12 @@ def _decode_minimal_mp3_with_pyav() -> None:
     if _decode_mp3_buffer_to_pcm16(buffer.getvalue(), sample_rate_hz=16000).size == 0:
         msg = "PyAV decoded zero samples"
         raise RuntimeError(msg)
+
+
+def _sha256_of_file(path: Path) -> str:
+    """计算文件 SHA256 hex digest，按 64 KB 块流式读取避免大文件 OOM。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as fp:
+        for chunk in iter(lambda: fp.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

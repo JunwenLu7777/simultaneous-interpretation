@@ -19,7 +19,7 @@ from teams_voice_interpreter.config import load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.live_say import LiveSayBridge, SayResult
-from teams_voice_interpreter.stt.vad import VadSegmenter
+from teams_voice_interpreter.stt.vad import VadBackendProtocol, VadSegmenter, WebRtcBackend
 
 BLANK_TRANSCRIPT_MARKERS = {"[BLANK_AUDIO]", "[NO_SPEECH]", "[NO SPEECH]"}
 HALLUCINATION_MARKERS = frozenset(
@@ -197,8 +197,14 @@ class StreamingAudioRecorder:
         frame_ms: int = 30,
         rms_threshold: float = 160.0,
         max_segments: int | None = None,
+        vad_backend: VadBackendProtocol | None = None,
     ) -> Iterable[np.ndarray]:
-        """按 VAD + 尾部静音 + 最大窗口输出稳定语音段。"""
+        """按 VAD + 尾部静音 + 最大窗口输出稳定语音段。
+
+        vad_backend 决定每帧的 sample 数（webrtc 30 ms / silero 32 ms）；外部 frame_ms
+        参数仅在 vad_backend 为 None 且需要回退到旧行为时使用。
+        """
+        del frame_ms  # 现统一由 vad_backend.frame_samples 决定，旧参数保留接口兼容
         if max_segment_seconds <= 0:
             raise UserFacingError(
                 code="listen.max_segment_seconds_invalid",
@@ -211,16 +217,21 @@ class StreamingAudioRecorder:
                 what_happened="发生了什么：VAD 静音和最短人声阈值必须大于 0。",
                 next_action="下一步如何做：请使用正数，例如 `--end-silence-ms 700`。",
             )
-        segmenter = _StableSpeechSegmenter(
-            overlap_frames=max(0, int(overlap_seconds * 1000 / frame_ms)),
-            end_silence_frames=max(1, end_silence_ms // frame_ms),
-            min_speech_frames=max(1, min_speech_ms // frame_ms),
-            max_segment_frames=max(1, int(max_segment_seconds * 1000 / frame_ms)),
+        if vad_backend is None:
+            vad_backend = WebRtcBackend()
+        actual_frame_ms = round(
+            vad_backend.frame_samples * 1000 / vad_backend.sample_rate_hz
         )
-        vad = VadSegmenter(sample_rate_hz=self.sample_rate_hz, frame_ms=frame_ms)
+        segmenter = _StableSpeechSegmenter(
+            overlap_frames=max(0, int(overlap_seconds * 1000 / actual_frame_ms)),
+            end_silence_frames=max(1, end_silence_ms // actual_frame_ms),
+            min_speech_frames=max(1, min_speech_ms // actual_frame_ms),
+            max_segment_frames=max(1, int(max_segment_seconds * 1000 / actual_frame_ms)),
+        )
+        vad = VadSegmenter(backend=vad_backend, sample_rate_hz=self.sample_rate_hz)
         emitted = 0
 
-        for frame in self.chunks(chunk_seconds=frame_ms / 1000):
+        for frame in self.chunks(chunk_seconds=actual_frame_ms / 1000):
             segment = segmenter.accept(
                 frame,
                 is_speech=_is_speech_frame(frame, vad=vad, rms_threshold=rms_threshold),

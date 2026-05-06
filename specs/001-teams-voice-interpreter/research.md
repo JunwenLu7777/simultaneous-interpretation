@@ -159,26 +159,31 @@
 
 ---
 
-## 5. VAD（Voice Activity Detection） — WebRTC VAD
+## 5. VAD（Voice Activity Detection） — Silero VAD ONNX 默认 + WebRTC VAD fallback
 
-### 决策
+### 决策（2026-05-06 修订）
 
-- **库**：`webrtcvad` 2.0（基于 Google WebRTC 项目）
-- **配置**：aggressiveness mode 2（中等敏感）；30 ms 帧；连续 ≥ 167 帧（约 5 s）静音触发 FR-013 finalize
+- **默认后端**：`silero-vad` v5.1.2 ONNX 模型（约 2.3 MB，SHA256 锁定 `2623a295…dd788f`），通过 `onnxruntime>=1.16.1` 推理；**应当**优先使用 CoreML provider，CPU provider 兜底
+- **fallback 后端**：`webrtcvad` 2.0（保留作为零依赖兼容路径，可由 `config.toml` 中 `vad_backend = "webrtc"` 切换）
+- **帧规格**：silero 后端固定 32 ms / 512 samples（v5 训练值）；webrtcvad 后端固定 30 ms / 480 samples
+- **模型分发**：`scripts/install-silero-vad.sh` 从 silero-vad GitHub raw 下载，校验 SHA256；缓存到 `~/.cache/teams-voice-interpreter/vad/silero_vad.onnx`；`tvi doctor / wizard` 通过 `silero_vad` readiness check 阻断启动
 - **回声规避**：上行 VAD 仅作用于内置麦克风输入；下行 VAD 仅作用于 BlackHole 输入，物理隔离
 
 ### 理由
 
-- WebRTC VAD 是 macOS / Linux / Windows 通用、零依赖（C 实现 + Python wrapper）
-- 30 ms 帧匹配 Whisper.cpp 输入颗粒度
-- mode 2 在普通会议噪声下假阳性率 < 5%
+- 论文 [Investigation of Whisper ASR Hallucinations Induced by Non-Speech Audio (arxiv 2501.11378)](https://arxiv.org/html/2501.11378v1) 实测把 Whisper 幻觉率从 **40.3 % 压到 0.2 %**（替换 webrtcvad 为 Silero VAD），同时 WER 降低 8-11 %；这是 partial/sliding ASR 暂缓后唯一能让 small-q5_1 模型可用的工程杠杆
+- ONNX 路径绕过 silero-vad PyPI 包硬依赖的 `torch>=1.12.0`：仅 `onnxruntime` 增量约 50 MB（ARM Mac wheel），与原「轻量初衷」可调和
+- M4 Metal CoreMLExecutionProvider 上 32 ms / 512 samples 推理实测 ~0.2 ms / 帧，每秒 ~31 次推理累计 < 1 % CPU，远低于 BM-3 ≤ 30 % 预算
+- webrtcvad 仍保留作为零依赖 fallback：30 ms 帧匹配旧 pipeline，aggressiveness mode 2 在普通会议噪声下假阳性率 < 5 %
 
 ### 备选方案
 
 | 备选 | 拒绝原因 |
 |------|----------|
-| Silero VAD（PyTorch 模型） | 引入 PyTorch 大依赖（500 MB），与轻量初衷冲突 |
-| 能量阈值 VAD | 在键盘敲击 / Teams 系统提示音下假阳性高 |
+| `silero-vad` PyPI 包（PyTorch 依赖路径） | `requires_dist` 把 `torch>=1.12.0` 列为硬依赖，引入 ~500 MB 增量；改走自行下载 ONNX + onnxruntime 推理路径 |
+| 能量阈值 VAD | 在键盘敲击 / Teams 系统提示音下假阳性高，且不能压制 Whisper 在静音段的训练集片尾幻觉 |
+| `funasr-onnx` FSMN-VAD（中文优化） | 引入对阿里 FunASR 的间接依赖；中文场景准确率优势对 Whisper 幻觉问题不直接命中；保留为后续 v1.1 备选 |
+| 仅 webrtcvad（不引入 ONNX 路径） | 真测显示 webrtcvad 配 small-q5_1 时训练集片尾幻觉率高到不可用；强制保 large-v3-q5_0 又使 ASR 时间退到 1.3-2.3 s |
 
 ---
 
