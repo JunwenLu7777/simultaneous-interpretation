@@ -45,6 +45,23 @@ def test_malformed_sse_line_raises_two_part_error() -> None:
         parse_sse_lines(["event: message"])
 
 
+def test_keepalive_comment_line_is_skipped() -> None:
+    """SSE 注释行（以 ":" 开头，例如 DeepSeek 的 `: keep-alive`）必须按规范跳过。"""
+    payload = {"choices": [{"delta": {"content": "Hi"}}]}
+
+    chunks = parse_sse_lines(
+        [
+            ": keep-alive",
+            f"data: {json.dumps(payload)}",
+            ":",
+            "data: [DONE]",
+        ]
+    )
+
+    assert [item.kind for item in chunks] == ["delta", "completed"]
+    assert chunks[0].text == "Hi"
+
+
 @pytest.mark.asyncio
 async def test_stream_translate_local_responder() -> None:
     """本地 responder 允许集成测试不依赖外网。"""

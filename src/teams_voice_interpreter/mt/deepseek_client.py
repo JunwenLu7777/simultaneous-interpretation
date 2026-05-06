@@ -46,6 +46,8 @@ def parse_sse_lines(lines: list[str]) -> list[TranslationChunk]:
     for line in lines:
         if not line.strip():
             continue
+        if line.startswith(":"):
+            continue
         if not line.startswith("data: "):
             raise DeepSeekError(
                 code="mt.sse_malformed",
