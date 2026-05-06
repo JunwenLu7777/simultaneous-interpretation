@@ -83,7 +83,7 @@ tvi duplex --online-asr --chunks 5 --show-latency
 | `--speech-rms-threshold FLOAT` | `180.0` | 判定有效人声的 RMS 阈值。环境噪声高时可调大，识别不触发时可调小。 |
 | `--show-latency / --hide-latency` | `--show-latency` | 是否打印每段延迟剖面。真测时建议保持开启。 |
 | `--online-asr / --segment-asr` | `--segment-asr` | 实验模式开关。启用后持续喂音频 chunk 产生稳定 partial；默认仍使用整段 ASR，避免未经真测的高频 Whisper 重跑影响准确率或 CPU。 |
-| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关。只有先用 `scripts/probe_online_asr.py` 证明 final 可确认 partial 达标后，才建议启用；否则 partial 不会提前调用 MT/TTS。 |
+| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关，必须和 `--online-asr` 同时使用。只有先用 `scripts/probe_online_asr.py` 证明 final 可确认 partial 达标后，才建议启用；否则 partial 不会提前调用 MT/TTS。 |
 | `--allow-shared-virtual-device` | 关闭 | 仅临时测试用，允许上行输出和下行输入使用同一个虚拟设备。正式会议不建议启用。 |
 
 ### 单向连续监听：`tvi listen`
