@@ -119,6 +119,38 @@ def test_ptt_command_can_override_direction_for_local_output(monkeypatch) -> Non
     assert "AirPods Pro" in result.output
 
 
+def test_listen_rejects_online_asr_early_prepare_without_online_asr() -> None:
+    """early prepare 开关必须绑定 online-asr，避免用户误以为已启用低延迟实验路径。"""
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "必须同时启用 `--online-asr`" in result.output
+
+
+def test_duplex_rejects_online_asr_early_prepare_without_online_asr() -> None:
+    """duplex 在设备探测前就应拒绝无效 online-asr 参数组合。"""
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "duplex",
+            "--online-asr-early-prepare",
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "必须同时启用 `--online-asr`" in result.output
+
+
 def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """listen 命令应持续采集分片，不依赖每句说完后手动停顿。"""
     captured: dict[str, object] = {}

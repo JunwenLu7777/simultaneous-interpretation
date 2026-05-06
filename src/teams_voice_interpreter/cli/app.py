@@ -273,6 +273,10 @@ def listen(
 ) -> None:
     """连续监听默认麦克风，分片识别后翻译并播出。"""
     try:
+        _validate_online_asr_options(
+            online_asr=online_asr,
+            online_asr_early_prepare=online_asr_early_prepare,
+        )
         direction = _direction_for_target(target, direction_option=direction_option)
         typer.echo("正在加载 Whisper 模型；加载完成后会开始连续监听。")
         bridge = _live_bridge_for_direction(direction)
@@ -323,6 +327,14 @@ def duplex(
     ),
 ) -> None:
     """启动真实双向同传：麦克风上行到 BlackHole，BlackHole 下行到默认输出。"""
+    try:
+        _validate_online_asr_options(
+            online_asr=online_asr,
+            online_asr_early_prepare=online_asr_early_prepare,
+        )
+    except UserFacingError as error:
+        typer.echo(str(error))
+        raise typer.Exit(1) from error
     errors: queue.Queue[BaseException] = queue.Queue()
     route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
     playback_gate: _PlaybackGate | None = _PlaybackGate() if route.shared_virtual_device else None
@@ -392,12 +404,12 @@ def duplex(
         typer.echo("开始双向监听；按 Ctrl+C 停止。")
         while any(pipeline.is_alive() for pipeline in pipelines):
             try:
-                error = errors.get_nowait()
+                pipeline_error = errors.get_nowait()
             except queue.Empty:
                 for pipeline in pipelines:
                     pipeline.join(timeout=0.1)
                 continue
-            raise error
+            raise pipeline_error
     except KeyboardInterrupt:
         typer.echo("已停止双向监听。")
     except UserFacingError as error:
@@ -488,6 +500,21 @@ def serve(
 def main() -> None:
     """运行命令行入口。"""
     app()
+
+
+def _validate_online_asr_options(*, online_asr: bool, online_asr_early_prepare: bool) -> None:
+    if online_asr_early_prepare and not online_asr:
+        raise UserFacingError(
+            code="online_asr.early_prepare_requires_online_asr",
+            what_happened=(
+                "发生了什么：`--online-asr-early-prepare` 只对 online ASR 实验路径生效，"
+                "当前没有启用 `--online-asr`。"
+            ),
+            next_action=(
+                "下一步如何做：必须同时启用 `--online-asr`，或删除 "
+                "`--online-asr-early-prepare` 使用默认整段 ASR。"
+            ),
+        )
 
 
 def _build_vad_backend() -> VadBackendProtocol:
