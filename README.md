@@ -83,8 +83,9 @@ tvi duplex --online-asr --chunks 5 --show-latency
 | `--speech-rms-threshold FLOAT` | `180.0` | 判定有效人声的 RMS 阈值。环境噪声高时可调大，识别不触发时可调小。 |
 | `--show-latency / --hide-latency` | `--show-latency` | 是否打印每段延迟剖面。真测时建议保持开启。 |
 | `--online-asr / --segment-asr` | `--segment-asr` | 实验模式开关。启用后持续喂音频 chunk 产生稳定 partial；默认仍使用整段 ASR，避免未经真测的高频 Whisper 重跑影响准确率或 CPU。 |
-| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关，必须和 `--online-asr` 以及已通过的 `--low-latency-proof` 同时使用；否则 partial 不会提前调用 MT/TTS。 |
-| `--low-latency-proof PATH` | 无 | 读取 `scripts/probe_online_asr.py --proof-json` 生成的 proof；仅在启用 `--online-asr-early-prepare` 时用于阻断未验证 partial。 |
+| `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 更激进的实验开关，必须和 `--online-asr`、已通过的 `--uplink-low-latency-proof`、已通过的 `--downlink-low-latency-proof` 同时使用；否则 partial 不会提前调用 MT/TTS。 |
+| `--uplink-low-latency-proof PATH` | 无 | 上行 proof，必须由 `scripts/probe_online_asr.py --direction uplink --language zh --proof-json` 生成并通过阈值。 |
+| `--downlink-low-latency-proof PATH` | 无 | 下行 proof，必须由 `scripts/probe_online_asr.py --direction downlink --language en --proof-json` 生成并通过阈值。 |
 | `--allow-shared-virtual-device` | 关闭 | 仅临时测试用，允许上行输出和下行输入使用同一个虚拟设备。正式会议不建议启用。 |
 
 ### 单向连续监听：`tvi listen`
@@ -112,7 +113,7 @@ tvi listen --online-asr --target default --direction uplink --chunks 3
 | `--show-latency / --hide-latency` | `--show-latency` | 同 `duplex`。 |
 | `--online-asr / --segment-asr` | `--segment-asr` | 同 `duplex`。 |
 | `--online-asr-early-prepare / --no-online-asr-early-prepare` | `--no-online-asr-early-prepare` | 同 `duplex`。 |
-| `--low-latency-proof PATH` | 无 | 同 `duplex`。 |
+| `--low-latency-proof PATH` | 无 | 单向 proof，必须和当前 `--direction` 对应的 ASR 语言匹配。 |
 
 ### 短句发声测试：`tvi say`
 
@@ -277,7 +278,7 @@ uv run --extra dev scripts/probe_online_asr.py /tmp/long_zh.wav \
   --proof-json /tmp/online-asr-proof.json
 ```
 
-输出包含首个稳定 partial、首个可翻译 stable partial、首个 final 可确认的可翻译 stable partial、final 文本、CER 与阈值失败提示；partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」估算，`--max-first-partial-s` 按 final 可确认的可翻译 partial 判定，避免把一个字的 early partial 或离线快速喂音频耗时误当成真实低延迟收益。`--proof-json` 会写出可被 `tvi doctor --require-low-latency --low-latency-proof <path>` 复核的机器可读证明；缺少低延迟阈值或 CER 阈值时 proof 不会通过。
+输出包含首个稳定 partial、首个可翻译 stable partial、首个 final 可确认的可翻译 stable partial、final 文本、CER 与阈值失败提示；partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」估算，`--max-first-partial-s` 按 final 可确认的可翻译 partial 判定，避免把一个字的 early partial 或离线快速喂音频耗时误当成真实低延迟收益。`--proof-json` 会写出可被 `tvi doctor --require-low-latency --low-latency-proof <path>` 复核的机器可读证明，并记录 direction / language / model / step_ms 等适用范围；缺少低延迟阈值或 CER 阈值时 proof 不会通过。
 
 ## 监管严格场景免责声明
 

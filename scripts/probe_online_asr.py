@@ -259,6 +259,12 @@ def proof_payload(
     *,
     max_first_partial_s: float | None,
     max_cer: float | None,
+    direction: AudioDirection | None = None,
+    language: str | None = None,
+    model_name: str | None = None,
+    sample_rate_hz: int | None = None,
+    step_ms: int | None = None,
+    frame_ms: int | None = None,
 ) -> dict[str, object]:
     """生成可供 doctor 读取的低延迟 proof JSON payload。"""
     failures = threshold_failures(
@@ -279,6 +285,14 @@ def proof_payload(
             "max_first_partial_s": max_first_partial_s,
             "max_cer": max_cer,
         },
+        "scope": {
+            "direction": direction.value if direction is not None else None,
+            "language": language,
+            "model": model_name,
+            "sample_rate_hz": sample_rate_hz,
+            "step_ms": step_ms,
+            "frame_ms": frame_ms,
+        },
         "metrics": {
             "duration_s": result.duration_s,
             "transcribe_calls": result.transcribe_calls,
@@ -298,6 +312,12 @@ def write_proof_json(
     *,
     max_first_partial_s: float | None,
     max_cer: float | None,
+    direction: AudioDirection | None = None,
+    language: str | None = None,
+    model_name: str | None = None,
+    sample_rate_hz: int | None = None,
+    step_ms: int | None = None,
+    frame_ms: int | None = None,
 ) -> None:
     """写出低延迟验收 proof JSON。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,6 +327,12 @@ def write_proof_json(
                 result,
                 max_first_partial_s=max_first_partial_s,
                 max_cer=max_cer,
+                direction=direction,
+                language=language,
+                model_name=model_name,
+                sample_rate_hz=sample_rate_hz,
+                step_ms=step_ms,
+                frame_ms=frame_ms,
             ),
             ensure_ascii=False,
             indent=2,
@@ -426,9 +452,10 @@ def main(argv: list[str] | None = None) -> int:
         model_name=normalize_whisper_model_name(args.model),
         language=args.language,
     )
+    direction = _direction(args.direction)
     result = run_online_asr_probe(
         samples,
-        direction=_direction(args.direction),
+        direction=direction,
         transcribe=transcriber.transcribe,
         sample_rate_hz=args.sample_rate_hz,
         step_ms=args.step_ms,
@@ -446,12 +473,24 @@ def main(argv: list[str] | None = None) -> int:
             result,
             max_first_partial_s=args.max_first_partial_s,
             max_cer=args.max_cer,
+            direction=direction,
+            language=args.language,
+            model_name=normalize_whisper_model_name(args.model),
+            sample_rate_hz=args.sample_rate_hz,
+            step_ms=args.step_ms,
+            frame_ms=args.frame_ms,
         )
         write_proof_json(
             args.proof_json,
             result,
             max_first_partial_s=args.max_first_partial_s,
             max_cer=args.max_cer,
+            direction=direction,
+            language=args.language,
+            model_name=normalize_whisper_model_name(args.model),
+            sample_rate_hz=args.sample_rate_hz,
+            step_ms=args.step_ms,
+            frame_ms=args.frame_ms,
         )
         proof_failures = proof.get("failures", [])
         if isinstance(proof_failures, list):

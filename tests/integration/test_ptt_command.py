@@ -35,7 +35,12 @@ def _silence_frames(count: int):
         yield np.zeros(480, dtype=np.int16)
 
 
-def _write_valid_low_latency_proof(tmp_path) -> str:  # type: ignore[no-untyped-def]
+def _write_valid_low_latency_proof(  # type: ignore[no-untyped-def]
+    tmp_path,
+    *,
+    direction: str = "uplink",
+    language: str = "zh",
+) -> str:
     proof_path = tmp_path / "online-asr-proof.json"
     proof_path.write_text(
         json.dumps(
@@ -44,6 +49,14 @@ def _write_valid_low_latency_proof(tmp_path) -> str:  # type: ignore[no-untyped-
                 "passed": True,
                 "failures": [],
                 "thresholds": {"max_first_partial_s": 1.2, "max_cer": 0.1},
+                "scope": {
+                    "direction": direction,
+                    "language": language,
+                    "model": "small-q5_1",
+                    "sample_rate_hz": 16000,
+                    "step_ms": 300,
+                    "frame_ms": 30,
+                },
                 "metrics": {
                     "first_confirmed_ready_partial_s": 0.8,
                     "cer": 0.0,
@@ -189,7 +202,7 @@ def test_listen_rejects_online_asr_early_prepare_without_low_latency_proof() -> 
 
     assert result.exit_code == 1
     assert "没有提供已通过的低延迟 proof" in result.output
-    assert "--low-latency-proof" in result.output
+    assert "对应的 proof 参数" in result.output
 
 
 def test_duplex_rejects_online_asr_early_prepare_without_low_latency_proof() -> None:
@@ -206,8 +219,56 @@ def test_duplex_rejects_online_asr_early_prepare_without_low_latency_proof() -> 
     )
 
     assert result.exit_code == 1
-    assert "没有提供已通过的低延迟 proof" in result.output
-    assert "--low-latency-proof" in result.output
+    assert "没有提供已通过的上行 低延迟 proof" in result.output
+    assert "对应的 proof 参数" in result.output
+
+
+def test_listen_rejects_low_latency_proof_scope_mismatch(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """listen proof 必须匹配当前方向和 ASR 语言。"""
+    proof_path = _write_valid_low_latency_proof(tmp_path, direction="downlink", language="en")
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "listen",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--low-latency-proof",
+            proof_path,
+            "--target",
+            "default",
+            "--direction",
+            "uplink",
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "proof 方向 `downlink` != `uplink`" in result.output
+    assert "proof 语言 `en` != `zh`" in result.output
+
+
+def test_duplex_requires_per_direction_low_latency_proofs(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """duplex early prepare 必须分别提供上行与下行 proof。"""
+    proof_path = _write_valid_low_latency_proof(tmp_path, direction="uplink", language="zh")
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "duplex",
+            "--online-asr",
+            "--online-asr-early-prepare",
+            "--uplink-low-latency-proof",
+            proof_path,
+            "--chunks",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "没有提供已通过的下行 低延迟 proof" in result.output
+    assert "对应的 proof 参数" in result.output
 
 
 def test_listen_rejects_failed_low_latency_proof_for_early_prepare(tmp_path) -> None:  # type: ignore[no-untyped-def]

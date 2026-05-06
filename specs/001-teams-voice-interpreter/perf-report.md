@@ -36,7 +36,7 @@
 | `small-q5_1`, `step_ms=900` | 15 | 4.49 s | 5.18 s | n/a | 0.50 s | 0.107 | Fail：调大 step 仍无 final 可确认 partial，且首个 stable partial 已变慢 |
 | `large-v3-turbo-q5_0`, `step_ms=300` | 43 | 2.22 s | 8.83 s | 8.83 s | 1.08 s | 0.107 | Fail：有可确认 partial，但确认点远超低延迟预算 |
 
-**对抗结论**：当前 `--online-asr` 是通过高频重跑本地 Whisper one-shot 模拟 partial，不是可交付的真正 streaming ASR。默认不得让 stable partial 提前调用 MT/TTS；只有先用探针 proof 证明「final 可确认可翻译 stable partial」和 CER 同时达标后，才可显式启用 `--online-asr-early-prepare --low-latency-proof <path>`。继续压低延迟应接入真正 sliding / partial ASR 引擎，而不是继续调 `step_ms` 或换大模型。
+**对抗结论**：当前 `--online-asr` 是通过高频重跑本地 Whisper one-shot 模拟 partial，不是可交付的真正 streaming ASR。默认不得让 stable partial 提前调用 MT/TTS；只有先用探针 proof 证明「final 可确认可翻译 stable partial」和 CER 同时达标，且 proof 的 direction / language 与当前管线匹配后，才可显式启用 `--online-asr-early-prepare`。`duplex` 必须分别提供上行与下行 proof。继续压低延迟应接入真正 sliding / partial ASR 引擎，而不是继续调 `step_ms` 或换大模型。
 
 ## 冷启动与分发形态合规
 

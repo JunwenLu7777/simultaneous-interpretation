@@ -214,12 +214,22 @@ def test_write_proof_json_records_passed_threshold_gate(tmp_path) -> None:  # ty
         result,
         max_first_partial_s=1.2,
         max_cer=0.1,
+        direction=AudioDirection.UPLINK,
+        language="zh",
+        model_name="small-q5_1",
+        sample_rate_hz=16000,
+        step_ms=300,
+        frame_ms=30,
     )
 
     payload = json.loads(proof_path.read_text(encoding="utf-8"))
     assert payload["passed"] is True
     assert payload["thresholds"]["max_first_partial_s"] == 1.2
     assert payload["thresholds"]["max_cer"] == 0.1
+    assert payload["scope"]["direction"] == "uplink"
+    assert payload["scope"]["language"] == "zh"
+    assert payload["scope"]["model"] == "small-q5_1"
+    assert payload["scope"]["step_ms"] == 300
     assert payload["metrics"]["first_confirmed_ready_partial_s"] == 0.8
     assert payload["metrics"]["cer"] == 0.0
 

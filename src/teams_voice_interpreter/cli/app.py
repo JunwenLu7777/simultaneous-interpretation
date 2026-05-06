@@ -59,6 +59,16 @@ LOW_LATENCY_PROOF_CLI_OPTION = typer.Option(
     "--low-latency-proof",
     help="读取 scripts/probe_online_asr.py --proof-json 生成的低延迟验收 proof。",
 )
+UPLINK_LOW_LATENCY_PROOF_CLI_OPTION = typer.Option(
+    None,
+    "--uplink-low-latency-proof",
+    help="duplex 上行 early-prepare 使用的低延迟 proof。",
+)
+DOWNLINK_LOW_LATENCY_PROOF_CLI_OPTION = typer.Option(
+    None,
+    "--downlink-low-latency-proof",
+    help="duplex 下行 early-prepare 使用的低延迟 proof。",
+)
 DIRECTION_CLI_OPTION = typer.Option(
     "auto",
     "--direction",
@@ -285,12 +295,14 @@ def listen(
 ) -> None:
     """连续监听默认麦克风，分片识别后翻译并播出。"""
     try:
+        direction = _direction_for_target(target, direction_option=direction_option)
         _validate_online_asr_options(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
             low_latency_proof=low_latency_proof,
+            expected_direction=direction,
+            expected_language=_source_language_for_direction(direction),
         )
-        direction = _direction_for_target(target, direction_option=direction_option)
         typer.echo("正在加载 Whisper 模型；加载完成后会开始连续监听。")
         bridge = _live_bridge_for_direction(direction)
         warm_up_pyav_decoder()
@@ -333,7 +345,8 @@ def duplex(
     show_latency: bool = SHOW_LATENCY_CLI_OPTION,
     online_asr: bool = ONLINE_ASR_CLI_OPTION,
     online_asr_early_prepare: bool = ONLINE_ASR_EARLY_PREPARE_CLI_OPTION,
-    low_latency_proof: Path | None = LOW_LATENCY_PROOF_CLI_OPTION,
+    uplink_low_latency_proof: Path | None = UPLINK_LOW_LATENCY_PROOF_CLI_OPTION,
+    downlink_low_latency_proof: Path | None = DOWNLINK_LOW_LATENCY_PROOF_CLI_OPTION,
     allow_shared_virtual_device: bool = typer.Option(
         False,
         "--allow-shared-virtual-device",
@@ -345,7 +358,18 @@ def duplex(
         _validate_online_asr_options(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
-            low_latency_proof=low_latency_proof,
+            low_latency_proof=uplink_low_latency_proof,
+            expected_direction=AudioDirection.UPLINK,
+            expected_language=_source_language_for_direction(AudioDirection.UPLINK),
+            proof_label="上行",
+        )
+        _validate_online_asr_options(
+            online_asr=online_asr,
+            online_asr_early_prepare=online_asr_early_prepare,
+            low_latency_proof=downlink_low_latency_proof,
+            expected_direction=AudioDirection.DOWNLINK,
+            expected_language=_source_language_for_direction(AudioDirection.DOWNLINK),
+            proof_label="下行",
         )
         route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
     except UserFacingError as error:
@@ -510,14 +534,23 @@ def doctor(
         raise typer.Exit(1)
 
 
-def _read_low_latency_proof(path: Path | None) -> LowLatencyProof | None:
+def _read_low_latency_proof(
+    path: Path | None,
+    *,
+    expected_direction: AudioDirection | None = None,
+    expected_language: str | None = None,
+) -> LowLatencyProof | None:
     """读取并复核 online-ASR proof JSON。"""
     if path is None:
         return None
     payload = _load_low_latency_proof_payload(path)
     if isinstance(payload, LowLatencyProof):
         return payload
-    return _validate_low_latency_proof_payload(payload)
+    return _validate_low_latency_proof_payload(
+        payload,
+        expected_direction=expected_direction,
+        expected_language=expected_language,
+    )
 
 
 def _load_low_latency_proof_payload(path: Path) -> dict[str, object] | LowLatencyProof:
@@ -548,10 +581,16 @@ def _load_low_latency_proof_payload(path: Path) -> dict[str, object] | LowLatenc
     return cast("dict[str, object]", raw)
 
 
-def _validate_low_latency_proof_payload(proof: dict[str, object]) -> LowLatencyProof:
+def _validate_low_latency_proof_payload(
+    proof: dict[str, object],
+    *,
+    expected_direction: AudioDirection | None = None,
+    expected_language: str | None = None,
+) -> LowLatencyProof:
     """复核 online-ASR proof JSON 指标与阈值。"""
     metrics = _json_object(proof.get("metrics"))
     thresholds = _json_object(proof.get("thresholds"))
+    scope = _json_object(proof.get("scope"))
     failures = _json_string_list(proof.get("failures"))
     first_confirmed_ready = _json_number(metrics, "first_confirmed_ready_partial_s")
     cer = _json_number(metrics, "cer")
@@ -563,6 +602,13 @@ def _validate_low_latency_proof_payload(proof: dict[str, object]) -> LowLatencyP
         max_first_partial=max_first_partial,
         cer=cer,
         max_cer=max_cer,
+    )
+    problems.extend(
+        _low_latency_scope_problems(
+            scope,
+            expected_direction=expected_direction,
+            expected_language=expected_language,
+        )
     )
     problems.extend(failures)
     if problems:
@@ -613,6 +659,22 @@ def _low_latency_proof_problems(
     return problems
 
 
+def _low_latency_scope_problems(
+    scope: dict[str, object],
+    *,
+    expected_direction: AudioDirection | None,
+    expected_language: str | None,
+) -> list[str]:
+    problems: list[str] = []
+    direction = _json_string(scope, "direction")
+    language = _json_string(scope, "language")
+    if expected_direction is not None and direction != expected_direction.value:
+        problems.append(f"proof 方向 `{direction or 'missing'}` != `{expected_direction.value}`")
+    if expected_language is not None and language != expected_language:
+        problems.append(f"proof 语言 `{language or 'missing'}` != `{expected_language}`")
+    return problems
+
+
 def _json_object(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return cast("dict[str, object]", value)
@@ -624,6 +686,13 @@ def _json_number(mapping: dict[str, object], key: str) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def _json_string(mapping: dict[str, object], key: str) -> str | None:
+    value = mapping.get(key)
+    if not isinstance(value, str):
+        return None
+    return value
 
 
 def _json_string_list(value: object) -> list[str]:
@@ -652,6 +721,9 @@ def _validate_online_asr_options(
     online_asr: bool,
     online_asr_early_prepare: bool,
     low_latency_proof: Path | None = None,
+    expected_direction: AudioDirection | None = None,
+    expected_language: str | None = None,
+    proof_label: str = "",
 ) -> None:
     if online_asr_early_prepare and not online_asr:
         raise UserFacingError(
@@ -668,18 +740,23 @@ def _validate_online_asr_options(
     if not online_asr_early_prepare:
         return
     if low_latency_proof is None:
+        label = f"{proof_label} " if proof_label else ""
         raise UserFacingError(
             code="online_asr.early_prepare_requires_low_latency_proof",
             what_happened=(
                 "发生了什么：`--online-asr-early-prepare` 会让 stable partial "
-                "提前调用 MT/TTS，但当前没有提供已通过的低延迟 proof。"
+                f"提前调用 MT/TTS，但当前没有提供已通过的{label}低延迟 proof。"
             ),
             next_action=(
                 "下一步如何做：请先运行 `scripts/probe_online_asr.py --proof-json <path>`，"
-                "再加上 `--low-latency-proof <path>`；或删除 `--online-asr-early-prepare`。"
+                "再加上对应的 proof 参数；或删除 `--online-asr-early-prepare`。"
             ),
         )
-    proof = _read_low_latency_proof(low_latency_proof)
+    proof = _read_low_latency_proof(
+        low_latency_proof,
+        expected_direction=expected_direction,
+        expected_language=expected_language,
+    )
     if proof is None or proof.verified:
         return
     raise UserFacingError(
