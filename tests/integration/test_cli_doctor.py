@@ -1,12 +1,18 @@
 """CLI doctor / serve 命令契约测试。"""
 
+import json
 from dataclasses import dataclass
 
 from typer.testing import CliRunner
 
 from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.cli import app as cli_app
-from teams_voice_interpreter.readiness import CheckStatus, ReadinessCheck, ReadinessReport
+from teams_voice_interpreter.readiness import (
+    CheckStatus,
+    LowLatencyProof,
+    ReadinessCheck,
+    ReadinessReport,
+)
 
 runner = CliRunner()
 
@@ -108,6 +114,90 @@ def test_doctor_accepts_low_latency_required_gate(monkeypatch) -> None:  # type:
     assert captured["mode"] == "realtime"
     assert captured["require_low_latency"] is True
     assert "已就绪" in result.output
+
+
+def test_doctor_reads_low_latency_proof_json(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """doctor 应读取 probe JSON，并把复核后的 proof 传入 readiness。"""
+    proof_path = tmp_path / "online-asr-proof.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": True,
+                "failures": [],
+                "thresholds": {"max_first_partial_s": 1.2, "max_cer": 0.1},
+                "metrics": {
+                    "first_confirmed_ready_partial_s": 0.8,
+                    "cer": 0.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+    report = ReadinessReport(
+        checks=[
+            ReadinessCheck(
+                key="blackhole",
+                title="BlackHole 2ch",
+                status=CheckStatus.PASS,
+                detail="OK",
+                next_action="",
+            )
+        ]
+    )
+
+    def build_checker(**kwargs: object) -> FakeChecker:
+        captured.update(kwargs)
+        return FakeChecker(report)
+
+    monkeypatch.setattr(cli_app, "ReadinessChecker", build_checker)
+
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "doctor",
+            "--mode",
+            "realtime",
+            "--require-low-latency",
+            "--low-latency-proof",
+            str(proof_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert isinstance(captured["low_latency_proof"], LowLatencyProof)
+    proof = captured["low_latency_proof"]
+    assert isinstance(proof, LowLatencyProof)
+    assert proof.verified
+    assert "0.80s <= 1.20s" in proof.detail
+
+
+def test_doctor_rejects_tampered_low_latency_proof(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """doctor 读取 proof 时必须复核指标，不能只信 passed=true。"""
+    proof_path = tmp_path / "online-asr-proof.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": True,
+                "failures": [],
+                "thresholds": {"max_first_partial_s": 1.2, "max_cer": 0.1},
+                "metrics": {
+                    "first_confirmed_ready_partial_s": 1.5,
+                    "cer": 0.25,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proof = cli_app._read_low_latency_proof(proof_path)
+
+    assert proof is not None
+    assert not proof.verified
+    assert "1.50s > 1.20s" in proof.detail
+    assert "CER 0.250 > 0.100" in proof.detail
 
 
 def test_doctor_prints_info_checks_without_failing(monkeypatch) -> None:  # type: ignore[no-untyped-def]

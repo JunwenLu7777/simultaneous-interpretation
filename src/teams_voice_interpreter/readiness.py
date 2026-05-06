@@ -90,6 +90,15 @@ class ReadinessReport:
         return {check.key: check for check in self.checks}
 
 
+@dataclass(frozen=True)
+class LowLatencyProof:
+    """低延迟验收探针 proof。"""
+
+    verified: bool
+    detail: str
+    next_action: str = ""
+
+
 @dataclass
 class ReadinessChecker:
     """执行 Teams 使用前 readiness 检查。"""
@@ -102,6 +111,7 @@ class ReadinessChecker:
     mode: Literal["phrase", "realtime"] = "realtime"
     require_low_latency: bool = False
     low_latency_verified: bool = False
+    low_latency_proof: LowLatencyProof | None = None
     require_live_pipeline: bool = True
     live_pipeline_enabled: bool = False
     uplink_virtual_device_name: str = "BlackHole 2ch"
@@ -422,6 +432,19 @@ class ReadinessChecker:
                     "latency_scope",
                     "低延迟验收",
                     "已通过 true streaming ASR 探针基线",
+                )
+            if self.low_latency_proof is not None:
+                if self.low_latency_proof.verified:
+                    return self._pass(
+                        "latency_scope",
+                        "低延迟验收",
+                        self.low_latency_proof.detail,
+                    )
+                return self._fail(
+                    "latency_scope",
+                    "低延迟验收",
+                    self.low_latency_proof.detail,
+                    self.low_latency_proof.next_action,
                 )
             return self._fail(
                 "latency_scope",

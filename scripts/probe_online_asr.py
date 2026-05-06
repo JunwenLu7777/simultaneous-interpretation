@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import wave
 from collections.abc import Callable, Iterable
@@ -253,6 +254,68 @@ def threshold_failures(
     return failures
 
 
+def proof_payload(
+    result: OnlineASRProbeResult,
+    *,
+    max_first_partial_s: float | None,
+    max_cer: float | None,
+) -> dict[str, object]:
+    """生成可供 doctor 读取的低延迟 proof JSON payload。"""
+    failures = threshold_failures(
+        result,
+        max_first_partial_s=max_first_partial_s,
+        max_cer=max_cer,
+    )
+    if max_first_partial_s is None:
+        failures.append("FAIL: 生成低延迟 proof 必须提供 --max-first-partial-s")
+    if max_cer is None:
+        failures.append("FAIL: 生成低延迟 proof 必须提供 --max-cer")
+    return {
+        "schema_version": 1,
+        "generated_by": "scripts/probe_online_asr.py",
+        "passed": not failures,
+        "failures": failures,
+        "thresholds": {
+            "max_first_partial_s": max_first_partial_s,
+            "max_cer": max_cer,
+        },
+        "metrics": {
+            "duration_s": result.duration_s,
+            "transcribe_calls": result.transcribe_calls,
+            "first_partial_s": result.first_partial_s,
+            "first_ready_partial_s": result.first_ready_partial_s,
+            "first_confirmed_ready_partial_s": result.first_confirmed_ready_partial_s,
+            "final_asr_s": result.final_asr_s,
+            "cer": result.cer,
+        },
+        "final_text": result.final_text,
+    }
+
+
+def write_proof_json(
+    path: Path,
+    result: OnlineASRProbeResult,
+    *,
+    max_first_partial_s: float | None,
+    max_cer: float | None,
+) -> None:
+    """写出低延迟验收 proof JSON。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            proof_payload(
+                result,
+                max_first_partial_s=max_first_partial_s,
+                max_cer=max_cer,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _first_confirmed_ready_partial_s(
     observations: list[StableChunkObservation],
     *,
@@ -350,6 +413,12 @@ def main(argv: list[str] | None = None) -> int:
         help="首个 final 可确认、可翻译 stable partial 上限。",
     )
     parser.add_argument("--max-cer", type=float, default=None, help="CER 上限。")
+    parser.add_argument(
+        "--proof-json",
+        type=Path,
+        default=None,
+        help="写出可供 `tvi doctor --low-latency-proof` 读取的低延迟验收 JSON。",
+    )
     args = parser.parse_args(argv)
 
     samples = load_wav_mono_int16(args.wav_path, target_rate_hz=args.sample_rate_hz)
@@ -372,6 +441,22 @@ def main(argv: list[str] | None = None) -> int:
         max_first_partial_s=args.max_first_partial_s,
         max_cer=args.max_cer,
     )
+    if args.proof_json is not None:
+        proof = proof_payload(
+            result,
+            max_first_partial_s=args.max_first_partial_s,
+            max_cer=args.max_cer,
+        )
+        write_proof_json(
+            args.proof_json,
+            result,
+            max_first_partial_s=args.max_first_partial_s,
+            max_cer=args.max_cer,
+        )
+        proof_failures = proof.get("failures", [])
+        if isinstance(proof_failures, list):
+            failures.extend(failure for failure in proof_failures if isinstance(failure, str))
+        failures = list(dict.fromkeys(failures))
     if failures:
         print()
         print("\n".join(failures))

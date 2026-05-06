@@ -5,7 +5,7 @@ import os
 from teams_voice_interpreter import readiness as readiness_mod
 from teams_voice_interpreter.audio.routing import AudioDevice
 from teams_voice_interpreter.errors import BlackHoleMissingError
-from teams_voice_interpreter.readiness import CheckStatus, ReadinessChecker
+from teams_voice_interpreter.readiness import CheckStatus, LowLatencyProof, ReadinessChecker
 
 
 class PassingProbe:
@@ -213,6 +213,46 @@ def test_readiness_realtime_mode_passes_when_low_latency_probe_verified() -> Non
     assert report.is_ready
     assert report.by_key["latency_scope"].status is CheckStatus.PASS
     assert "true streaming ASR" in report.by_key["latency_scope"].detail
+
+
+def test_readiness_realtime_mode_passes_with_valid_low_latency_proof() -> None:
+    """doctor proof 通过时，低延迟验收项应能放行。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+        require_low_latency=True,
+        low_latency_proof=LowLatencyProof(
+            verified=True,
+            detail="低延迟 proof 通过：首段 0.80s <= 1.20s，CER 0.000 <= 0.100。",
+        ),
+    ).run()
+
+    assert report.is_ready
+    assert report.by_key["latency_scope"].status is CheckStatus.PASS
+    assert "低延迟 proof 通过" in report.by_key["latency_scope"].detail
+
+
+def test_readiness_realtime_mode_fails_with_invalid_low_latency_proof() -> None:
+    """doctor proof 不通过时，低延迟验收必须保留原始失败原因。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+        require_low_latency=True,
+        low_latency_proof=LowLatencyProof(
+            verified=False,
+            detail="低延迟 proof 未通过：CER 0.250 > 0.100",
+            next_action="下一步如何做：请重新运行探针。",
+        ),
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["latency_scope"].status is CheckStatus.FAIL
+    assert "CER 0.250" in report.by_key["latency_scope"].detail
+    assert "重新运行探针" in report.by_key["latency_scope"].next_action
 
 
 def test_readiness_phrase_mode_fails_when_low_latency_required() -> None:

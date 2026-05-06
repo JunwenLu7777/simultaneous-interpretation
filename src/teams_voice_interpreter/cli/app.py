@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, TypeVar, cast
 
 import numpy as np
@@ -33,7 +34,12 @@ from teams_voice_interpreter.live_ptt import (
     _update_forced_split_continuation_on_open_frame,
 )
 from teams_voice_interpreter.live_say import LiveSayBridge, PreparedSayResult, SayResult
-from teams_voice_interpreter.readiness import CheckStatus, ReadinessChecker, ReadinessReport
+from teams_voice_interpreter.readiness import (
+    CheckStatus,
+    LowLatencyProof,
+    ReadinessChecker,
+    ReadinessReport,
+)
 from teams_voice_interpreter.session.manager import DEFAULT_MANAGER
 from teams_voice_interpreter.stt.vad import (
     SileroBackend,
@@ -48,6 +54,11 @@ app = typer.Typer(help="Teams 双向实时语音同传桥")
 DoctorMode = Literal["phrase", "realtime"]
 DirectionOption = Literal["auto", "uplink", "downlink"]
 _T = TypeVar("_T")
+LOW_LATENCY_PROOF_CLI_OPTION = typer.Option(
+    None,
+    "--low-latency-proof",
+    help="读取 scripts/probe_online_asr.py --proof-json 生成的低延迟验收 proof。",
+)
 DIRECTION_CLI_OPTION = typer.Option(
     "auto",
     "--direction",
@@ -468,6 +479,7 @@ def doctor(
         "--require-low-latency/--no-require-low-latency",
         help="把低延迟验收作为阻断门禁；当前未接入 true streaming ASR 时会 fail-closed。",
     ),
+    low_latency_proof: Path | None = LOW_LATENCY_PROOF_CLI_OPTION,
 ) -> None:
     """检查进入 Teams 会议前的阻断项。"""
     if mode not in {"phrase", "realtime"}:
@@ -487,10 +499,133 @@ def doctor(
         silero_vad_model_path=settings.silero_vad_model_path(),
         mode=doctor_mode,
         require_low_latency=require_low_latency,
+        low_latency_proof=_read_low_latency_proof(low_latency_proof),
     ).run()
     _print_readiness_report(report)
     if not report.is_ready:
         raise typer.Exit(1)
+
+
+def _read_low_latency_proof(path: Path | None) -> LowLatencyProof | None:
+    """读取并复核 online-ASR proof JSON。"""
+    if path is None:
+        return None
+    payload = _load_low_latency_proof_payload(path)
+    if isinstance(payload, LowLatencyProof):
+        return payload
+    return _validate_low_latency_proof_payload(payload)
+
+
+def _load_low_latency_proof_payload(path: Path) -> dict[str, object] | LowLatencyProof:
+    """读取 online-ASR proof JSON payload。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        return LowLatencyProof(
+            verified=False,
+            detail=f"无法读取低延迟 proof：{path} ({error})",
+            next_action=(
+                "下一步如何做：请先运行 `scripts/probe_online_asr.py --proof-json <path>` "
+                "生成 proof，再重新执行 doctor。"
+            ),
+        )
+    except json.JSONDecodeError as error:
+        return LowLatencyProof(
+            verified=False,
+            detail=f"低延迟 proof 不是合法 JSON：{path} ({error.msg})",
+            next_action="下一步如何做：请重新运行 online ASR 探针生成 proof JSON。",
+        )
+    if not isinstance(raw, dict):
+        return LowLatencyProof(
+            verified=False,
+            detail="低延迟 proof 格式错误：顶层必须是 JSON object。",
+            next_action="下一步如何做：请重新运行 online ASR 探针生成 proof JSON。",
+        )
+    return cast("dict[str, object]", raw)
+
+
+def _validate_low_latency_proof_payload(proof: dict[str, object]) -> LowLatencyProof:
+    """复核 online-ASR proof JSON 指标与阈值。"""
+    metrics = _json_object(proof.get("metrics"))
+    thresholds = _json_object(proof.get("thresholds"))
+    failures = _json_string_list(proof.get("failures"))
+    first_confirmed_ready = _json_number(metrics, "first_confirmed_ready_partial_s")
+    cer = _json_number(metrics, "cer")
+    max_first_partial = _json_number(thresholds, "max_first_partial_s")
+    max_cer = _json_number(thresholds, "max_cer")
+    problems = _low_latency_proof_problems(
+        passed=proof.get("passed") is True,
+        first_confirmed_ready=first_confirmed_ready,
+        max_first_partial=max_first_partial,
+        cer=cer,
+        max_cer=max_cer,
+    )
+    problems.extend(failures)
+    if problems:
+        return LowLatencyProof(
+            verified=False,
+            detail="低延迟 proof 未通过：" + "；".join(dict.fromkeys(problems)),
+            next_action=(
+                "下一步如何做：请重新运行 online ASR 探针，确认低延迟阈值和 CER 阈值同时通过。"
+            ),
+        )
+    return LowLatencyProof(
+        verified=True,
+        detail=(
+            "低延迟 proof 通过：首个 final 可确认可翻译 stable partial "
+            f"{first_confirmed_ready:.2f}s <= {max_first_partial:.2f}s，"
+            f"CER {cer:.3f} <= {max_cer:.3f}。"
+        ),
+    )
+
+
+def _low_latency_proof_problems(
+    *,
+    passed: bool,
+    first_confirmed_ready: float | None,
+    max_first_partial: float | None,
+    cer: float | None,
+    max_cer: float | None,
+) -> list[str]:
+    problems: list[str] = []
+    if not passed:
+        problems.append("proof 标记为未通过")
+    if max_first_partial is None:
+        problems.append("缺少 thresholds.max_first_partial_s")
+    if max_cer is None:
+        problems.append("缺少 thresholds.max_cer")
+    if first_confirmed_ready is None:
+        problems.append("缺少 metrics.first_confirmed_ready_partial_s")
+    if cer is None:
+        problems.append("缺少 metrics.cer")
+    if first_confirmed_ready is not None and max_first_partial is not None:
+        if first_confirmed_ready > max_first_partial:
+            problems.append(
+                f"首个 final 可确认可翻译 stable partial {first_confirmed_ready:.2f}s "
+                f"> {max_first_partial:.2f}s"
+            )
+    if cer is not None and max_cer is not None and cer > max_cer:
+        problems.append(f"CER {cer:.3f} > {max_cer:.3f}")
+    return problems
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    return {}
+
+
+def _json_number(mapping: dict[str, object], key: str) -> float | None:
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _json_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 @app.command()

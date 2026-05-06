@@ -154,7 +154,8 @@ tvi ptt --seconds 5 --target default --direction downlink
 ```bash
 tvi doctor
 tvi doctor --mode realtime --confirm-teams-route
-tvi doctor --mode realtime --confirm-teams-route --require-low-latency
+tvi doctor --mode realtime --confirm-teams-route --require-low-latency \
+  --low-latency-proof /tmp/online-asr-proof.json
 tvi doctor --deepseek-api-key-env DEEPSEEK_API_KEY
 ```
 
@@ -166,6 +167,7 @@ tvi doctor --deepseek-api-key-env DEEPSEEK_API_KEY
 | `--confirm-teams-route` | 关闭 | 表示你已手动确认会议软件麦克风/扬声器路由。 |
 | `--deepseek-api-key-env TEXT` | `DEEPSEEK_API_KEY` | DeepSeek API Key 所在环境变量名。 |
 | `--require-low-latency / --no-require-low-latency` | `--no-require-low-latency` | 把低延迟作为阻断验收项；当前未接入 true streaming ASR 与探针基线时会 fail-closed。 |
+| `--low-latency-proof PATH` | 无 | 读取 `scripts/probe_online_asr.py --proof-json` 生成的 JSON；只有实测低延迟阈值和 CER 阈值均通过才放行。 |
 
 ### 设备清单：`tvi devices`
 
@@ -269,10 +271,11 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 uv run --extra dev scripts/probe_online_asr.py /tmp/long_zh.wav \
   --expected-text "我们今天讨论现金流预测方案和下季度预算安排" \
   --max-first-partial-s 1.2 \
-  --max-cer 0.12
+  --max-cer 0.12 \
+  --proof-json /tmp/online-asr-proof.json
 ```
 
-输出包含首个稳定 partial、首个可翻译 stable partial、首个 final 可确认的可翻译 stable partial、final 文本、CER 与阈值失败提示；partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」估算，`--max-first-partial-s` 按 final 可确认的可翻译 partial 判定，避免把一个字的 early partial 或离线快速喂音频耗时误当成真实低延迟收益。
+输出包含首个稳定 partial、首个可翻译 stable partial、首个 final 可确认的可翻译 stable partial、final 文本、CER 与阈值失败提示；partial 时间按「实时音频到达下界 + 同步 ASR 重跑耗时」估算，`--max-first-partial-s` 按 final 可确认的可翻译 partial 判定，避免把一个字的 early partial 或离线快速喂音频耗时误当成真实低延迟收益。`--proof-json` 会写出可被 `tvi doctor --require-low-latency --low-latency-proof <path>` 复核的机器可读证明；缺少低延迟阈值或 CER 阈值时 proof 不会通过。
 
 ## 监管严格场景免责声明
 
