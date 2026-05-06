@@ -463,6 +463,11 @@ def doctor(
         "--mode",
         help="检查模式：phrase=短句播入 Teams；realtime=实时麦克风同传。",
     ),
+    require_low_latency: bool = typer.Option(
+        False,
+        "--require-low-latency/--no-require-low-latency",
+        help="把低延迟验收作为阻断门禁；当前未接入 true streaming ASR 时会 fail-closed。",
+    ),
 ) -> None:
     """检查进入 Teams 会议前的阻断项。"""
     if mode not in {"phrase", "realtime"}:
@@ -481,6 +486,7 @@ def doctor(
         vad_backend=settings.vad_backend,
         silero_vad_model_path=settings.silero_vad_model_path(),
         mode=doctor_mode,
+        require_low_latency=require_low_latency,
     ).run()
     _print_readiness_report(report)
     if not report.is_ready:

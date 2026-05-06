@@ -154,6 +154,7 @@ tvi ptt --seconds 5 --target default --direction downlink
 ```bash
 tvi doctor
 tvi doctor --mode realtime --confirm-teams-route
+tvi doctor --mode realtime --confirm-teams-route --require-low-latency
 tvi doctor --deepseek-api-key-env DEEPSEEK_API_KEY
 ```
 
@@ -164,6 +165,7 @@ tvi doctor --deepseek-api-key-env DEEPSEEK_API_KEY
 | `--mode phrase\|realtime` | `phrase` | `phrase` 检查短句播入路径；`realtime` 检查真实双向同传路径。 |
 | `--confirm-teams-route` | 关闭 | 表示你已手动确认会议软件麦克风/扬声器路由。 |
 | `--deepseek-api-key-env TEXT` | `DEEPSEEK_API_KEY` | DeepSeek API Key 所在环境变量名。 |
+| `--require-low-latency / --no-require-low-latency` | `--no-require-low-latency` | 把低延迟作为阻断验收项；当前未接入 true streaming ASR 与探针基线时会 fail-closed。 |
 
 ### 设备清单：`tvi devices`
 

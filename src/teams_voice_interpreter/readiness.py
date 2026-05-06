@@ -100,6 +100,8 @@ class ReadinessChecker:
     deepseek_api_key: str = ""
     teams_route_confirmed: bool = False
     mode: Literal["phrase", "realtime"] = "realtime"
+    require_low_latency: bool = False
+    low_latency_verified: bool = False
     require_live_pipeline: bool = True
     live_pipeline_enabled: bool = False
     uplink_virtual_device_name: str = "BlackHole 2ch"
@@ -399,10 +401,36 @@ class ReadinessChecker:
 
     def _latency_scope_check(self) -> ReadinessCheck:
         if self.mode == "phrase":
+            if self.require_low_latency:
+                return self._fail(
+                    "latency_scope",
+                    "低延迟验收",
+                    "phrase 模式只证明短句发声路径，不能验收实时同传低延迟。",
+                    (
+                        "下一步如何做：请改用 `tvi doctor --mode realtime --require-low-latency`，"
+                        "并先接入 true streaming ASR 与探针基线。"
+                    ),
+                )
             return self._info(
                 "latency_scope",
                 "延迟范围说明",
                 "phrase 模式只证明短句发声路径，不证明实时同传延迟。",
+            )
+        if self.require_low_latency:
+            if self.low_latency_verified:
+                return self._pass(
+                    "latency_scope",
+                    "低延迟验收",
+                    "已通过 true streaming ASR 探针基线",
+                )
+            return self._fail(
+                "latency_scope",
+                "低延迟验收",
+                "当前 ASR 仍以整段 Whisper.cpp 为主，尚未证明首段低延迟达标。",
+                (
+                    "下一步如何做：请先接入 true streaming ASR，并用 `scripts/probe_online_asr.py` "
+                    "证明 final 可确认的可翻译 stable partial 达标。"
+                ),
             )
         return self._info(
             "latency_scope",

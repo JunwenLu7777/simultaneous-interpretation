@@ -182,6 +182,54 @@ def test_readiness_realtime_mode_allows_live_duplex_path() -> None:
     assert "只证明会议测试通路" in report.by_key["latency_scope"].detail
 
 
+def test_readiness_realtime_mode_fails_when_low_latency_required_without_probe() -> None:
+    """要求低延迟验收时，未证明 true streaming ASR 必须阻断。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+        require_low_latency=True,
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["latency_scope"].status is CheckStatus.FAIL
+    assert report.by_key["latency_scope"].required
+    assert "尚未证明首段低延迟达标" in report.by_key["latency_scope"].detail
+    assert "true streaming ASR" in report.by_key["latency_scope"].next_action
+
+
+def test_readiness_realtime_mode_passes_when_low_latency_probe_verified() -> None:
+    """未来接入探针证明后，低延迟验收项应能放行。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        downlink_virtual_device_name="TVI Downlink",
+        require_low_latency=True,
+        low_latency_verified=True,
+    ).run()
+
+    assert report.is_ready
+    assert report.by_key["latency_scope"].status is CheckStatus.PASS
+    assert "true streaming ASR" in report.by_key["latency_scope"].detail
+
+
+def test_readiness_phrase_mode_fails_when_low_latency_required() -> None:
+    """phrase 模式不得被误当作实时低延迟验收。"""
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        require_low_latency=True,
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["latency_scope"].status is CheckStatus.FAIL
+    assert "不能验收实时同传低延迟" in report.by_key["latency_scope"].detail
+
+
 def test_readiness_realtime_mode_blocks_shared_virtual_device() -> None:
     """实时模式默认必须阻断单虚拟设备双向回灌风险。"""
     report = ReadinessChecker(

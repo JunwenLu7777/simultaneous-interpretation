@@ -81,6 +81,35 @@ def test_doctor_accepts_teams_route_confirmation(monkeypatch) -> None:  # type: 
     assert "已就绪" in result.output
 
 
+def test_doctor_accepts_low_latency_required_gate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """用户要求低延迟验收时，doctor 应把阻断门禁传入 checker。"""
+    captured: dict[str, object] = {}
+    report = ReadinessReport(
+        checks=[
+            ReadinessCheck(
+                key="blackhole",
+                title="BlackHole 2ch",
+                status=CheckStatus.PASS,
+                detail="OK",
+                next_action="",
+            )
+        ]
+    )
+
+    def build_checker(**kwargs: object) -> FakeChecker:
+        captured.update(kwargs)
+        return FakeChecker(report)
+
+    monkeypatch.setattr(cli_app, "ReadinessChecker", build_checker)
+
+    result = runner.invoke(cli_app.app, ["doctor", "--mode", "realtime", "--require-low-latency"])
+
+    assert result.exit_code == 0
+    assert captured["mode"] == "realtime"
+    assert captured["require_low_latency"] is True
+    assert "已就绪" in result.output
+
+
 def test_doctor_prints_info_checks_without_failing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """INFO 检查项应展示为说明，不得让 doctor 非 0。"""
     report = ReadinessReport(
