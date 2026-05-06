@@ -78,9 +78,10 @@ SHOW_LATENCY_CLI_OPTION = typer.Option(
     "--show-latency/--hide-latency",
     help="显示每段 ASR / 翻译播放耗时，便于调试延迟。",
 )
-REALTIME_PLAYBACK_QUEUE_SIZE = 1
+REALTIME_PLAYBACK_QUEUE_SIZE = 3
 REALTIME_MAX_PLAYBACK_SECONDS = 3.0
-REALTIME_STALE_PLAYBACK_WAIT_SECONDS = 1.5
+REALTIME_STALE_PLAYBACK_WAIT_SECONDS = 3.0
+BURST_GAP_THRESHOLD_SECONDS = 1.0
 
 
 @app.command()
@@ -494,6 +495,7 @@ def _run_listen_pipeline(
     playback_queue: queue.Queue[_PendingPlayback | None] = queue.Queue(
         maxsize=REALTIME_PLAYBACK_QUEUE_SIZE
     )
+    burst_tracker = _BurstTracker()
     worker = threading.Thread(
         target=_listen_worker,
         args=(
@@ -505,6 +507,7 @@ def _run_listen_pipeline(
             label,
             show_latency,
             playback_gate,
+            burst_tracker,
         ),
         daemon=True,
     )
@@ -582,9 +585,11 @@ def _listen_worker(
     label: str,
     show_latency: bool,
     playback_gate: _PlaybackGate | None,
+    burst_tracker: _BurstTracker | None = None,
 ) -> None:
     """后台处理 ASR / 翻译 / 合成，避免阻塞继续采集。"""
     loop = asyncio.new_event_loop()
+    tracker = burst_tracker or _BurstTracker()
     try:
         while True:
             item = segment_queue.get()
@@ -603,6 +608,7 @@ def _listen_worker(
                     show_latency=show_latency,
                     playback_gate=playback_gate,
                     loop=loop,
+                    burst_tracker=tracker,
                 )
             finally:
                 segment_queue.task_done()
@@ -623,6 +629,34 @@ class _PendingPlayback:
     queue_depth_at_enqueue: int
     dropped_pending_before_enqueue: int
     show_latency: bool
+    burst_id: int = 0
+
+
+class _BurstTracker:
+    """识别同一 utterance 内的连续段：相邻段 transcribed_at 间隔 < 阈值则共享 burst_id。"""
+
+    def __init__(
+        self,
+        *,
+        gap_threshold_s: float = BURST_GAP_THRESHOLD_SECONDS,
+    ) -> None:
+        self._gap_threshold_s = gap_threshold_s
+        self._last_transcribed_at: float | None = None
+        self._current_burst_id: int = 0
+
+    def assign(self, transcribed_at: float) -> int:
+        """返回该段的 burst_id；与上一段间隔 > 阈值则递增（视为新 utterance）。"""
+        if (
+            self._last_transcribed_at is None
+            or transcribed_at - self._last_transcribed_at > self._gap_threshold_s
+        ):
+            self._current_burst_id += 1
+        self._last_transcribed_at = transcribed_at
+        return self._current_burst_id
+
+    @property
+    def current_burst_id(self) -> int:
+        return self._current_burst_id
 
 
 def _prepare_listen_segment(
@@ -637,6 +671,7 @@ def _prepare_listen_segment(
     show_latency: bool,
     playback_gate: _PlaybackGate | None,
     loop: asyncio.AbstractEventLoop | None = None,
+    burst_tracker: _BurstTracker | None = None,
 ) -> None:
     started = time.perf_counter()
     display_index = _display_index(label, index)
@@ -655,6 +690,8 @@ def _prepare_listen_segment(
         return
     transcribed_at = time.perf_counter()
     typer.echo(f"{display_index} 识别：{text}")
+    tracker = burst_tracker or _BurstTracker()
+    burst_id = tracker.assign(transcribed_at)
     try:
         prepare_coro = bridge.say_bridge.prepare(
             text,
@@ -672,10 +709,10 @@ def _prepare_listen_segment(
         return
     prepared_at = time.perf_counter()
     typer.echo(f"{display_index} 译文：{prepared.target_text}")
-    dropped_pending = _drop_pending_playbacks(playback_queue)
+    dropped_pending = _drop_pending_playbacks(playback_queue, current_burst_id=burst_id)
     if dropped_pending:
         typer.echo(
-            f"{display_index} 已丢弃 {dropped_pending} 个未播放旧段：实时播放只保留最新译音。"
+            f"{display_index} 已丢弃 {dropped_pending} 个跨 burst 旧段：保留同 burst 多段连续播放。"
         )
     queue_depth_at_enqueue = playback_queue.qsize()
     playback_queue.put(
@@ -689,23 +726,38 @@ def _prepare_listen_segment(
             queue_depth_at_enqueue=queue_depth_at_enqueue,
             dropped_pending_before_enqueue=dropped_pending,
             show_latency=show_latency,
+            burst_id=burst_id,
         )
     )
 
 
-def _drop_pending_playbacks(playback_queue: queue.Queue[_PendingPlayback | None]) -> int:
-    """丢弃尚未开始播放的旧译音，实时模式只保留最新段。"""
+def _drop_pending_playbacks(
+    playback_queue: queue.Queue[_PendingPlayback | None],
+    *,
+    current_burst_id: int = 0,
+) -> int:
+    """丢弃 burst_id < current_burst_id 的旧 utterance pending；同 burst 段保留 FIFO 不丢。"""
     dropped = 0
+    kept: list[_PendingPlayback] = []
+    sentinel_seen = False
     while True:
         try:
             item = playback_queue.get_nowait()
         except queue.Empty:
-            return dropped
+            break
         if item is None:
-            playback_queue.put(None)
-            return dropped
+            sentinel_seen = True
+            break
         playback_queue.task_done()
-        dropped += 1
+        if item.burst_id < current_burst_id:
+            dropped += 1
+        else:
+            kept.append(item)
+    for item in kept:
+        playback_queue.put(item)
+    if sentinel_seen:
+        playback_queue.put(None)
+    return dropped
 
 
 def _listen_playback_worker(
@@ -714,14 +766,22 @@ def _listen_playback_worker(
     playback_gate: _PlaybackGate | None = None,
     suppress_downlink_on_playback: bool = False,
 ) -> None:
-    """按顺序播放已准备好的译音。"""
+    """按顺序播放已准备好的译音；同 burst 段豁免 stale 检查保护长句多段连续输出。"""
+    last_played_burst_id: int | None = None
     while True:
         item = playback_queue.get()
         try:
             if item is None:
                 return
+            same_burst_as_last = (
+                last_played_burst_id is not None
+                and item.burst_id == last_played_burst_id
+            )
             stale_wait_s = time.perf_counter() - item.prepared_at
-            if stale_wait_s > REALTIME_STALE_PLAYBACK_WAIT_SECONDS:
+            if (
+                not same_burst_as_last
+                and stale_wait_s > REALTIME_STALE_PLAYBACK_WAIT_SECONDS
+            ):
                 typer.echo(
                     f"{_display_index(item.label, item.index)} 已丢弃：译音等待播放 "
                     f"{stale_wait_s:.2f}s，超过实时窗口 "
@@ -755,6 +815,7 @@ def _listen_playback_worker(
                 playback_started=playback_started,
                 completed_at=completed_at,
             )
+            last_played_burst_id = item.burst_id
         finally:
             playback_queue.task_done()
 
