@@ -21,11 +21,8 @@ class Settings(BaseSettings):
     web_port: int = Field(default=8765, ge=1024, le=65535)
     host: str = "127.0.0.1"
     model_name: str = "small-q5_1"
-    asr_initial_prompt: str = (
-        "以下是普通话口语转写，内容可能包含会议发言、技术演示、产品设计、"
-        "同声传译软件、优雅设计、新机器、年龄数字和连续提问。"
-        "常见词包括：同声传译、实时同传、DeepSeek、BlackHole、Teams、AirPods。"
-    )
+    # 仅放专有名词词典：small 模型会把描述性长句当 "风格种子" 在弱语音段衍生输出。
+    asr_initial_prompt: str = "DeepSeek BlackHole Teams AirPods 同声传译 实时同传"
     deepseek_api_key_env: str = "DEEPSEEK_API_KEY"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
