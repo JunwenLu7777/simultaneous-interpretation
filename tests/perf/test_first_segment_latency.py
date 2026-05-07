@@ -12,5 +12,5 @@ def test_first_segment_latency(
         return 600.0, 1100.0
 
     p50, p95 = benchmark(measure)
-    assert p50 <= 800
-    assert p95 <= 1500
+    assert p50 <= 1200  # 2026-05-07 宪章修订 PR 自 ≤ 800 ms 调整为硬阈值；软目标 ≤ 1000 ms 由 release notes 公布
+    assert p95 <= 2000  # 2026-05-07 宪章修订 PR 自 ≤ 1500 ms 调整

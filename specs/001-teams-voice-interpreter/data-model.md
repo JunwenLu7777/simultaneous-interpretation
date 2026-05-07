@@ -194,7 +194,7 @@ class SynthesizedAudioSegment(BaseModel):
 **验证规则**：
 
 - 不持久化原始音频字节（FR-023）；ring buffer 仅暂存到写出
-- `first_byte_at - started_at + first_token_at` 之前的耗时之和必须满足端到端首段译音 ≤ 800 ms
+- `first_byte_at - started_at + first_token_at` 之前的耗时之和必须满足端到端首段译音 ≤ 1200 ms（硬阈值，2026-05-07 宪章修订自 800 ms）/ ≤ 1000 ms（软目标）
 
 ---
 
@@ -238,8 +238,8 @@ class LatencySnapshot(BaseModel):
 
 **宪章 IV 校验**：
 
-- `p50[E2E_FIRST_SEG] ≤ 800 ms`
-- `p95[E2E_FIRST_SEG] ≤ 1200 ms`
+- `p50[E2E_FIRST_SEG] ≤ 1200 ms`（硬阈值，2026-05-07 宪章修订自 800 ms）/ ≤ 1000 ms（软目标）
+- `p95[E2E_FIRST_SEG] ≤ 2000 ms`（2026-05-07 宪章修订自 1200 ms；本次同时把原 data-model 与 SC-001 旧 p95 1500 ms 之间的轻微不一致一并对齐到统一新阈值）
 - `p50[E2E_FULL] ≤ 2500 ms`
 - `p95[E2E_FULL] ≤ 4000 ms`
 - `p50[MT_FIRST_TOKEN] ≤ 800 ms`

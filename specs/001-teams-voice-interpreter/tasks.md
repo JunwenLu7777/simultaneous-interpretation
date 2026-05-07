@@ -77,7 +77,7 @@ description: "Teams 实时双向语音同传桥（macOS）任务清单"
 
 ## 阶段 3：用户故事 1 — 上行同传：用户说中文，对方听到英文（优先级 P1） 🎯 MVP
 
-**故事目标**：用户用中文发言，远端 Teams 同事在 ≤ 800 ms 首段译音延迟下听到流式英文译音；端到端整段 p50 ≤ 2.5 s。
+**故事目标**：用户用中文发言，远端 Teams 同事在 ≤ 1200 ms 首段译音延迟下听到流式英文译音（2026-05-07 宪章修订自 800 ms；持续优化软目标 ≤ 1000 ms）；端到端整段 p50 ≤ 2.5 s。
 
 **独立测试**：在 Teams 测试通话中切换麦克风为 BlackHole 2ch，开启上行同传，朗读标准商务中文台词；远端录音可听到流式英文译音；首段译音延迟可由外部时钟测得。
 
@@ -86,7 +86,7 @@ description: "Teams 实时双向语音同传桥（macOS）任务清单"
 - [x] T030 [P] [US1] 在 `tests/contract/test_deepseek_streaming.py` 中编写契约测试：覆盖 200 OK SSE / 401 / 402 / 429 退避 / 5xx 退避 / [DONE] 终止符 / SSE 格式异常 / 网络中断（覆盖 contracts/deepseek-translate.md §10）
 - [x] T031 [P] [US1] 在 `tests/contract/test_edge_tts.py` 中编写契约测试：覆盖正常流式 chunks / 401-403 token 自动刷新 / 音色枚举校验 / SSML 注入防御（覆盖 contracts/edge-tts.md §10）
 - [x] T032 [P] [US1] 在 `tests/contract/test_whisper_cpp.py` 中编写契约测试：覆盖模型加载 / partial-final 顺序 / VAD close_segment / 子进程崩溃 / heartbeat 卡死 / 模型降档（覆盖 contracts/whisper-cpp.md §9）
-- [x] T033 [P] [US1] 在 `tests/integration/test_uplink_pipeline.py` 中编写端到端集成测试：fixture `conference-cn.wav` 输入 → BlackHole 2ch 输出字节流；断言首段译音 ≤ 800 ms、整段 ≤ 2.5 s（覆盖 spec US1 验收场景 1–3）
+- [x] T033 [P] [US1] 在 `tests/integration/test_uplink_pipeline.py` 中编写端到端集成测试：fixture `conference-cn.wav` 输入 → BlackHole 2ch 输出字节流；断言首段译音 ≤ 1200 ms（2026-05-07 宪章修订自 800 ms）、整段 ≤ 2.5 s（覆盖 spec US1 验收场景 1–3）
 
 ### US1 — 实现前性能基线 benchmark（按 plan.md 复杂度追踪门禁）
 
@@ -132,13 +132,13 @@ description: "Teams 实时双向语音同传桥（macOS）任务清单"
 
 ## 阶段 4：用户故事 2 — 下行同传：远端说英文，用户听到中文（优先级 P1）
 
-**故事目标**：远端用英文发言，用户在 ≤ 800 ms 首段延迟下从 Mac 默认输出听到流式中文译音；与 US1 共同构成完整双向闭环。
+**故事目标**：远端用英文发言，用户在 ≤ 1200 ms 首段延迟下（2026-05-07 宪章修订自 800 ms；持续优化软目标 ≤ 1000 ms）从 Mac 默认输出听到流式中文译音；与 US1 共同构成完整双向闭环。
 
 **独立测试**：Teams 测试通话中由对端播放标准商务英文台词；本系统从 BlackHole 2ch 捕获 → 下行管线 → 用户耳机听到流式中文译音；首段延迟可外部测得。
 
 ### US2 — 测试先
 
-- [x] T061 [P] [US2] 在 `tests/integration/test_downlink_pipeline.py` 中编写端到端集成测试：fixture `conference-en.wav` 经 BlackHole 输入 → 默认输出字节流；断言首段译音 ≤ 800 ms（覆盖 spec US2 验收场景 1–3）
+- [x] T061 [P] [US2] 在 `tests/integration/test_downlink_pipeline.py` 中编写端到端集成测试：fixture `conference-en.wav` 经 BlackHole 输入 → 默认输出字节流；断言首段译音 ≤ 1200 ms（2026-05-07 宪章修订自 800 ms）（覆盖 spec US2 验收场景 1–3）
 - [x] T062 [P] [US2] 在 `tests/contract/test_audio_routing.py` 中编写契约测试：BlackHole 双通道 → mono 转换、Aggregate Device 检测、设备运行时消失分支（覆盖 contracts/blackhole-coreaudio.md §9）
 
 ### US2 — 实现（多数为扩展现有模块支持反向）

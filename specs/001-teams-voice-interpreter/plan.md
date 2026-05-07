@@ -9,7 +9,7 @@
 
 ## 摘要
 
-本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Edge-TTS** 做流式 TTS，构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 800 ms 中位、整段端到端 ≤ 2.5 s p50"为目标；本计划在复杂度追踪中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并要求在 US1 生产实现前通过基线 benchmark 决定是降档到量化模型、替换服务栈，还是触发宪章 IV 预算修订流程。
+本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Edge-TTS** 做流式 TTS，构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 1200 ms 中位（硬阈值）/ ≤ 1000 ms（软目标）、整段端到端 ≤ 2.5 s p50"为目标（首段阈值 2026-05-07 宪章修订 PR 自 ≤ 800 ms 调整，依据 BM-4 / C+α 真测，详见 perf-report.md）；本计划在复杂度追踪中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并要求在 US1 生产实现前通过基线 benchmark 决定是降档到量化模型、替换服务栈，还是触发宪章 IV 预算修订流程。
 
 ---
 
@@ -50,8 +50,8 @@
 
 | 指标 | 预算 | 来源 |
 |---|---|---|
-| 首段译音延迟 p50 | ≤ 800 ms | SC-001 / 宪章 IV 端到端化 |
-| 首段译音延迟 p95 | ≤ 1.5 s | SC-001 / SC-002 |
+| 首段译音延迟 p50 | ≤ 1200 ms（硬）/ ≤ 1000 ms（软）| SC-001 / 宪章 IV 端到端化（2026-05-07 自 800 ms 修订）|
+| 首段译音延迟 p95 | ≤ 2.0 s | SC-001 / SC-002（2026-05-07 自 1.5 s 修订）|
 | 端到端整段延迟 p50 | ≤ 2.5 s | SC-003 / 宪章 IV |
 | 端到端整段延迟 p95 | ≤ 4.0 s | SC-003 / 宪章 IV |
 | LLM 翻译首 token | ≤ 800 ms | 宪章 IV |
@@ -75,7 +75,7 @@
 | `TTS_FIRST_BYTE` | p50 ≤ 400 ms，p95 ≤ 800 ms | 英文 / 中文 | BM-6 |
 | `TTS_COMPLETED` | p50 ≤ 1.5 s | 英文 / 中文 | BM-6 / SC-003 |
 | `AUDIO_ROUTE` | p95 ≤ 50 ms；Aggregate jitter p95 ≤ 10 ms | BlackHole / 默认输出 | BM-8 / BM-9 |
-| `E2E_FIRST_SEG` | p50 ≤ 800 ms，p95 ≤ 1.5 s | 上行 / 下行 | BM-10 / BM-10D / SC-001 / SC-002 |
+| `E2E_FIRST_SEG` | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软），p95 ≤ 2.0 s | 上行 / 下行 | BM-10 / BM-10D / SC-001 / SC-002（2026-05-07 宪章修订）|
 | `E2E_FULL` | p50 ≤ 2.5 s，p95 ≤ 4.0 s | 上行 / 下行 | BM-11 / SC-003 |
 
 **约束**：
@@ -149,7 +149,7 @@
 
 **部分通过 → 见下方复杂度追踪行 1 / 2 / 3 / 4**。
 
-- **首段译音 ≤ 800 ms（p50）**：宪章预算与 SC-001 一致；**实测期望 800–1200 ms**（已知风险），见复杂度追踪行 3
+- **首段译音 p50 ≤ 1200 ms（硬阈值）/ ≤ 1000 ms（软目标）**（2026-05-07 宪章修订自 ≤ 800 ms）：BM-4 / C+α 真测累加 ≈ 1113 ms，落在硬阈值内；软目标差距 ~113 ms，作为持续优化方向。复杂度追踪行 3 已 R3 关闭。
 - 端到端 p50 ≤ 2.5 s / p95 ≤ 4.0 s：可达成
 - LLM 首 token ≤ 800 ms：DeepSeek streaming 实测中位 200–400 ms，可达成
 - LLM 整段 ≤ 1.5 s：可达成
@@ -337,7 +337,7 @@ README.md                                  # 含 SC-011 监管严格场景免责
 |------|---------|-----------------------|------|
 | **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%（绝对 WER 增量 + 5–8%，相对增量 ≈ 60%；BM-2 量化），会损害 SC-005「翻译可懂度 ≥ 4/5」。US1 实现前门禁将基线 small 与 tiny 双语方案；≤ 1.6 GB 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成模型降档 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 US1 实现前 BM-1 基线；阈值已改为风险观测，不是发布豁免 |
 | **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。US1 实现前门禁将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。≤ 40% 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成优化 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 US1 实现前 BM-3 基线；阈值已改为风险观测，不是发布豁免 |
-| **行 3**：首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）| spec Q1 本地 Whisper.cpp 流式 partial 输出 hop 长度物理下限约 600 ms，无法压到云 STT 的 200 ms 级别。≤ 1200 ms p50 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成服务栈替换 / 降级方案，或通过独立宪章修订 PR 正式调整预算。 | 切到云 STT 违反 spec Q1 零成本；用 small 以下模型准确率不达标；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | 风险，待 US1 实现前 BM-10 与 US2 BM-10D 基线；阈值已改为风险观测，不是发布豁免 |
+| **行 3**：~~首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）~~ **R3 (2026-05-07) 已关闭**：通过宪章修订 PR 把 SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms 硬阈值 + ≤ 1000 ms 软目标，p95 从 ≤ 1.5 s 调整为 ≤ 2.0 s。修订依据：BM-4 实测 DeepSeek MT first token p50 566-598 ms + C+α 实测整段 ASR ≤ 310 ms 累加 ≈ 1113 ms，落在新硬阈值内（详见 perf-report.md「DeepSeek MT first token 真实化（BM-4）」段与「ASR 整段耗时 vs 段长（C+α 测量）」段）。> 1500 ms 视为二次修订触发阈值。| 同 R1/R2：本地 STT 物理下限 + spec Q1 零成本约束；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | **R3 已修订并关闭**，2026-05-07 |
 | **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。阶段 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认；**触发条件** = BM-7 24h 401/403 失败率 ≥ 0.5% 或单次会话内 ≥ 3 次连续 401/403。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有阶段 0 BM-7 退出计划 |
 | **行 5**：`src/teams_voice_interpreter/cli/app.py` 854 行（违反宪章 I「单文件应当 ≤ 300 行」）| 该文件汇集 `tvi doctor / serve / start / pause / resume / stop / status / wizard / say / ptt / listen / duplex / export` 等所有用户面 CLI 子命令，并需要在每条命令中按宪章 III 输出「发生了什么 + 用户下一步可以做什么」两段式提示；P1 流式播放又在 listen / duplex playback worker 增加 streaming fallback、PyAV 预热、首字节延迟输出、`prepare / queue / first_pcm / first_write` 延迟剖面，以及实时播放队列过期丢弃/单段限时策略，所以单条命令的 click/typer 装饰器 + 提示模板已超出常规函数体量。为了在 V1 内打通端到端用户路径，先把所有命令集中放置以共享 `load_settings / AudioDeviceProbe / ReadinessChecker / LiveSayBridge / LivePushToTalkBridge` 等单实例。 | 拆出 `cli/commands/` 子模块短期内会让命令注册、共享工具和测试入口翻倍；现阶段优先把真实链路接通并完成延迟定位。 | 临时违例；**退出计划**：在 V1 性能基线复跑后按"短句类（say/ptt/listen）/ 长会话类（serve/start/pause/resume/stop/duplex）/ 诊断类（doctor/wizard/status/export）"三组拆分为 `cli/commands/*.py`，目标单文件 ≤ 300 行；每个子命令组保持独立单测入口；登记日期 2026-05-05。 |
 | **行 6**：`src/teams_voice_interpreter/live_ptt.py` 462 行 | 同时承载 `MicrophoneRecorder / StreamingAudioRecorder / StreamingMicrophoneRecorder / StreamingBlackHoleRecorder / _StableSpeechSegmenter / WhisperOneShotTranscriber / LivePushToTalkBridge` 与配套重采样、VAD、RMS、空音频幻觉阻断工具函数；为保证在 ptt / listen / duplex 之间共享同一套 PCM → Whisper 入口，本期先合并到一个文件。 | 提前拆分会迫使工具函数重复或暴露内部状态；当前一文件内可读且可被单测 mock。 | 临时违例；**退出计划**：在 duplex 真机基线通过后，按"录音器（recorder.py）/ 分段器（segmenter.py）/ 转写器（transcriber.py）/ 桥（bridge.py）"四组拆分；每组保持 ≤ 300 行；登记日期 2026-05-05。 |
