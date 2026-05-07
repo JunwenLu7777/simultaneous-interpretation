@@ -2,8 +2,8 @@
 
 **日期**：2026-05-05
 **Git commit**：当前 HEAD；本报告不内嵌自引用提交哈希，使用 `git log -1 --oneline` 核验
-**硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Piper 默认路径基准待发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已完成 BM-4 / BM-6 真实化、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 复测 first token 最差方向 p50 518.6 ms / p95 825.9 ms，p50 与 p95 均超预算**；Edge-TTS 版 BM-6 曾测得 p50 789-815 ms / p95 941-1049 ms，导致端到端约 1702-1733 ms 并触发服务栈替换。随后 Piper 对比探针确认默认 TTS 可降至最差方向 p50 121.4 ms / p95 183.1 ms，生产默认路径已改为 Piper，BM-6 子预算同步收紧为 p50 ≤ 200 ms / p95 ≤ 400 ms。C+α 复测整段 ASR 约 280-417 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**2026-05-07 宪章修订 PR (709ea05) 已合并**：SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms（硬）+ ≤ 1000 ms（软），p95 从 ≤ 1.5 s 调整为 ≤ 2000 ms；Piper 默认路径的子段估算为上行 0.417s + 0.504s + 0.121s + ROUTE ~0.050s ≈ **1092 ms**、下行 0.322s + 0.519s + 0.107s + ROUTE ~0.050s ≈ **998 ms**，显示该服务栈有望进入硬阈值并贴近软目标。**端到端门禁仍必须以 BM-10 / BM-10D 真机复跑为准**，当前不得把子段估算声明为 SC-001 / SC-002 已 Pass。详见「Stage 5 无人值守复测」段。
+**硬件**：本地 M3 + Metal + Piper 默认路径；BlackHole / Teams 真机会话仍需发布前复跑
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"已被逐步替换为真实测量。2026-05-07 已完成 BM-4 / BM-6 子段真实化、ASR C+α 测量，以及 BM-10 / BM-10D 无人值守 E2E replay。结论从"有望进入 1200 ms 硬阈值"修正为：**当前生产顺序 ASR final → MT completed → TTS first byte 下，BM-10 / BM-10D p50 均 Fail**。上行段闭合后首音 p50 1720.0 ms / p95 1817.3 ms；下行段闭合后首音 p50 1657.9 ms / p95 1959.0 ms，均超过 SC-001 / SC-002 p50 ≤ 1200 ms 硬阈值。若从合成输入音频开头算代理口径，上行 p50 5310.5 ms / p95 10342.9 ms、下行 p50 5189.1 ms / p95 7616.2 ms，说明整段 ASR 边界本身不适合作为"远端开口/本端开口到首音"承诺。Piper 仍让 BM-6 子段通过（最差方向 p50 121.4 ms / p95 183.1 ms），但仅替换 TTS 不足以让当前端到端生产顺序达标；下一步必须优化 MT completed 前启动 TTS、缩短切段/引入可证明的 streaming ASR，或触发阈值/范围重审。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
@@ -16,8 +16,8 @@
 | BM-7 | Edge-TTS 稳定性 | 401/403 失败率 0.1% | < 0.5% | Pass | 无 |
 | BM-8 | AUDIO_ROUTE | BlackHole 路由 p95 18 ms | ≤ 50 ms | Pass | 无 |
 | BM-9 | SC-002 | Aggregate jitter p95 8 ms | ≤ 10 ms | Pass | 无 |
-| BM-10 | SC-001 | 上行首段 p50 600 ms / p95 1100 ms（**stub，待真实化**） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | 未判定（stub） | 必须用 Piper 默认生产路径真实化后再判定 |
-| BM-10D | SC-002 | 下行首段 p50 700 ms（**stub，待真实化**） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | 未判定（stub） | 必须用 Piper 默认生产路径真实化后再判定 |
+| BM-10 | SC-001 | 上行 E2E replay：段闭合后首音 p50 1720.0 ms / p95 1817.3 ms；音频开头代理 p50 5310.5 ms / p95 10342.9 ms（Stage 5b，无人值守） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | **Fail (p50)** | 阻断发布；当前生产顺序等待 MT completed 后才启动 TTS，需改为更早启动 TTS / 缩短切段 / 重审阈值 |
+| BM-10D | SC-002 | 下行 E2E replay：段闭合后首音 p50 1657.9 ms / p95 1959.0 ms；音频开头代理 p50 5189.1 ms / p95 7616.2 ms（Stage 5b，无人值守） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | **Fail (p50)** | 阻断发布；同 BM-10，且 p95 仅贴近 2000 ms 上限 |
 | BM-11 | SC-003 | 整段 p50 1800 ms / p95 3200 ms | p50 ≤ 2.5 s / p95 ≤ 4.0 s | Pass | 无 |
 | BM-12 | SC-004 | 60 分钟用户感知中断 0 次 | = 0 | Pass | 无 |
 | BM-13 | SC-004 / 宪章 IV | 24h 内存增长 2.5% | ≤ 5% | Pass | 无 |
@@ -212,20 +212,20 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 3. **Piper p95 (197 ms) 比 Edge-TTS p50 (789 ms) 还快 4 倍**。这是"本地 vs 云"在端到端延迟上的真实差距。
 4. **Piper 中文音色 `zh_CN-huayan-medium` 主观听感"够用"**（本会话用户判断）：清晰度可接受、有轻微"AI 朗读"机器感但不影响商务对话理解。XTTS-v2 中文质量略好但不足以补偿 7 倍延迟差距。
 
-**对端到端 SC-001 的影响（救回 1200 ms 硬阈值）**：
+**对端到端 SC-001 的影响（子段估算曾显示可救回，E2E replay 已修正）**：
 
-如果换 Piper，端到端实测累加：
+Stage 4 阶段用 MT first token + Piper first byte 做过乐观子段估算：
 
 | 方向 | ASR | MT first token | TTS first byte (Piper) | AUDIO_ROUTE | 累加 | vs SC-001 |
 |------|---:|---:|---:|---:|---:|---|
 | 上行 | 297 ms | 566 ms | **103 ms** | ~50 ms | **1016 ms** | 进硬阈值 1200 ms，余 184 ms；离软目标 1000 ms 仅 16 ms |
 | 下行 | 270 ms | 598 ms | **107 ms** | ~50 ms | **1025 ms** | 进硬阈值 1200 ms，余 175 ms；离软目标 1000 ms 仅 25 ms |
 
-**对比换 Piper 前**：BM-6 阶段累加 ~1702-1733 ms（超硬阈值 500 ms）→ 换 Piper 后 ~1016-1025 ms（**进硬阈值，且接近软目标**）。**单工程动作（换 TTS）即把 SC-001 从 fail-closed 救回到 Pass + 接近软目标**，无需二次宪章修订。
+**E2E replay 修正**：当前 `live_say` / `duplex` 生产顺序不是 MT first token 后立即 TTS，而是先消费到 MT completed，再把完整译文交给 TTS。因此 Stage 5b 真测结果为上行段闭合后首音 p50 1720.0 ms / p95 1817.3 ms、下行 p50 1657.9 ms / p95 1959.0 ms。Piper 仍显著降低 TTS 子段，但**单工程动作（换 TTS）不足以把当前端到端生产顺序救回 Pass**。
 
 **决策**：**v1 服务栈 TTS 由 Edge-TTS 替换为 Piper**。理由：
-- 唯一进 SC-001 ≤ 1200 ms 硬阈值的方案
-- 接近 ≤ 1000 ms 软目标（差 16-25 ms）
+- 唯一能让 BM-6 TTS first byte 子预算稳定通过的免费本地方案
+- 消除 Edge-TTS 网络首字节 ~800 ms 的结构性拖累
 - 完全免费 + MIT license + 100 MB 资源占用
 - 无网络依赖（与 spec.md L199「个人自用」边界更契合）
 
@@ -244,7 +244,7 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 5. ✅ 已新增 `contracts/piper-tts.md`，并保留 `contracts/edge-tts.md` 作为降级路径契约。
 6. ✅ 已修改 `spec.md` v1 服务栈锁定段（Edge-TTS → Piper）+ 子预算约束（TTS first byte p50 ≤ 200 ms / p95 ≤ 400 ms）。
 7. ✅ 已修改 `plan.md` 性能目标 / 阶段预算 + 复杂度追踪行 4（Edge-TTS 风险关闭）。
-8. ⏳ 集成测试仍需在真机上复跑上行 / 下行端到端首段延迟，确认生产路径 ≤ 1200 ms。
+8. ❌ Stage 5b 无人值守 E2E replay 已复跑上行 / 下行首段；当前生产顺序未达 p50 ≤ 1200 ms。
 9. ✅ 已更新 `perf-report.md` 主表 BM-6 行为 Piper 子预算与实测。
 
 **最近真测发现的子预算修订需求**：现有 BM-6 子预算（first byte p50 ≤ 400 ms / p95 ≤ 800 ms）按 Edge-TTS 量级设定，对 Piper 显著过宽（实测 p50 100 ms / p95 200 ms）。集成 PR 应一并把 BM-6 子预算调整为「first byte p50 ≤ 200 ms / p95 ≤ 400 ms」以反映 Piper 真实下限。
@@ -271,6 +271,35 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 - 下行保守估算：ASR 322 ms + MT 519 ms + Piper 107 ms + AUDIO_ROUTE 50 ms ≈ **998 ms**。
 
 **边界**：该复测证明 Piper 默认路径的 TTS 子段稳定落在预算内，也证明 DeepSeek MT 子段仍有预算风险。它仍不是 BM-10 / BM-10D 真实端到端测量；发布门禁必须用真实 `listen` / `duplex` 路径复跑并记录首段写入时间。
+
+### Stage 5b：BM-10 / BM-10D 无人值守 E2E replay
+
+**日期**：2026-05-07  
+**命令入口**：`uv run --extra dev scripts/measure_e2e_first_segment.py --samples-per-direction 3 --config config.toml --proof-json /tmp/tvi-e2e-first-segment.json`  
+**口径**：用 macOS `say` 生成上下行各 3 条固定商务 WAV；串起 `WhisperOneShotTranscriber` → `DeepSeekStreamingClient` → `build_tts_client(settings)`。当前生产顺序为 **ASR final → MT completed → TTS first byte**，所以 BM-10 / BM-10D 不能再用 MT first token 子段估算替代。  
+**结果**：6/6 成功，无 ASR / MT / Piper runtime 错误。
+
+| 方向 | 成功 | 失败 | 段闭合后 p50 | 段闭合后 p95 | 从音频开头 p50 | 从音频开头 p95 | 结论 |
+|------|------|------|-------------|-------------|---------------|---------------|------|
+| 上行 BM-10 | 3 | 0 | 1720.0 ms | 1817.3 ms | 5310.5 ms | 10342.9 ms | **Fail：p50 > 1200 ms** |
+| 下行 BM-10D | 3 | 0 | 1657.9 ms | 1959.0 ms | 5189.1 ms | 7616.2 ms | **Fail：p50 > 1200 ms，p95 贴近 2000 ms** |
+
+| 方向 | 段长 | ASR | MT first | MT done | TTS first | 段闭合后首音 | 音频开头首音 |
+|------|------|-----|----------|---------|-----------|--------------|--------------|
+| uplink | 1.988 s | 0.301 s | 0.395 s | 0.605 s | 0.814 s | 1.720 s | 3.708 s |
+| uplink | 4.022 s | 0.334 s | 0.469 s | 0.745 s | 0.210 s | 1.288 s | 5.310 s |
+| uplink | 8.526 s | 0.452 s | 0.456 s | 1.006 s | 0.360 s | 1.817 s | 10.343 s |
+| downlink | 1.560 s | 0.289 s | 0.519 s | 0.715 s | 0.955 s | 1.959 s | 3.519 s |
+| downlink | 3.841 s | 0.321 s | 0.547 s | 0.802 s | 0.225 s | 1.348 s | 5.189 s |
+| downlink | 5.958 s | 0.353 s | 0.579 s | 0.985 s | 0.320 s | 1.658 s | 7.616 s |
+
+**关键观察**：
+
+1. **子段估算低估了真实 E2E**：先前使用 MT first token 累加，但生产 TTS 实际等待 MT completed；仅这一差异就给长句增加约 200-500 ms。
+2. **Piper 不是当前失败主因**：大多数样本 Piper first byte 仍在 210-360 ms；两条短句出现 814/955 ms，说明首个语音模型调用仍有 warm/cold 抖动，但主结构问题是 TTS 启动太晚。
+3. **从音频开头算的代理口径不可达**：当前整段 ASR 必须等语音段闭合；长段会天然把"开口到首音"推到 5-10 s。若 SC-001 / SC-002 要按开口时刻理解，必须引入可证明的 streaming ASR / early prepare，不应继续用整段 ASR 口径声明达标。
+
+**退出动作**：BM-10 / BM-10D 当前阻断发布。优先修复方向是让 TTS 在 MT completed 前获得可播文本（例如基于 delta 的句片段缓冲 / early TTS）并重新 replay；若仍不达标，再评估切段策略、真正 streaming ASR 或 SC-001 / SC-002 阈值重审。
 
 ## 冷启动与分发形态合规
 
