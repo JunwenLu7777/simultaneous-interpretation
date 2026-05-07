@@ -82,8 +82,11 @@ def _sample(
     asr_final_s: float | None = 0.3,
     mt_completed_s: float | None = 0.6,
     tts_first_byte_s: float | None = 0.1,
+    mt_to_first_audio_s: float | None = None,
     error: str | None = None,
 ) -> Any:
+    if mt_to_first_audio_s is None and mt_completed_s is not None and tts_first_byte_s is not None:
+        mt_to_first_audio_s = mt_completed_s + tts_first_byte_s
     return measure.E2ESample(
         direction=direction,
         source_voice="Tingting",
@@ -98,6 +101,7 @@ def _sample(
         tts_first_byte_s=tts_first_byte_s,
         tts_completed_s=0.5,
         tts_audio_format="pcm_s16le_22050",
+        mt_to_first_audio_s=mt_to_first_audio_s,
         error=error,
     )
 
@@ -123,7 +127,7 @@ def test_summarize_reports_post_segment_and_speech_start_percentiles() -> None:
 
     assert summary.success_count == 3
     assert summary.failure_count == 1
-    assert summary.post_segment_p50_ms == 600.0
+    assert summary.post_segment_p50_ms == pytest.approx(600.0)
     assert summary.post_segment_p95_ms == pytest.approx(800.0)
     assert summary.speech_start_p50_ms == 2600.0
     assert summary.speech_start_p95_ms == 3800.0
@@ -157,8 +161,25 @@ async def test_measure_tts_first_byte_consumes_stream_to_completed() -> None:
     assert result.audio_format == "pcm_s16le_22050"
 
 
+async def test_measure_mt_to_early_tts_starts_tts_before_mt_completed() -> None:
+    """E2E replay 应在首个 MT delta 后启动 TTS，而不是等待 completed。"""
+    result = await measure.measure_mt_to_early_tts(
+        _FakeMTClient(),
+        _FakeTTSClient(),
+        "下次会议三点开始",
+        direction=AudioDirection.UPLINK,
+    )
+
+    assert result.succeeded
+    assert result.mt_first_token_s is not None
+    assert result.mt_completed_s is not None
+    assert result.mt_to_first_audio_s is not None
+    assert result.tts_first_byte_s is not None
+    assert result.translated_text.startswith("Hello")
+
+
 async def test_measure_e2e_sample_runs_asr_mt_then_tts() -> None:
-    """单样本测量应串起 ASR、MT completed 和 TTS first byte。"""
+    """单样本测量应串起 ASR、MT delta early TTS first byte。"""
     record = await measure.measure_e2e_sample(
         direction=AudioDirection.UPLINK,
         source_voice="Tingting",
@@ -204,7 +225,7 @@ def test_proof_payload_records_pipeline_order_and_samples() -> None:
 
     assert payload["schema_version"] == 1
     definitions = payload["definitions"]
-    assert definitions["current_pipeline_order"] == "ASR final -> MT completed -> TTS first byte"
+    assert definitions["current_pipeline_order"] == "ASR final -> MT delta early TTS first byte"
     written_samples = payload["samples"]
     assert written_samples[0]["post_segment_first_audio_s"] == pytest.approx(1.0)
 

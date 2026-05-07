@@ -4,7 +4,7 @@
 本脚本用 macOS `say` 生成固定商务样本 WAV，然后串行复用当前生产模块：
 
 1. WhisperOneShotTranscriber 整段 ASR
-2. DeepSeekStreamingClient 流式翻译，但当前生产 TTS 在 MT completed 后启动
+2. DeepSeekStreamingClient 流式翻译，首个非空 MT delta 触发 early TTS
 3. Piper/Edge-TTS factory 返回的 TTS client，测第一个音频事件到达
 
 因此报告同时给出两个口径：
@@ -31,7 +31,7 @@ import subprocess
 import time
 import wave
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -187,6 +187,35 @@ class TTSMeasurement:
 
 
 @dataclass(frozen=True)
+class EarlyTTSMeasurement:
+    """MT delta 触发 early TTS 后的首音耗时。"""
+
+    mt_first_token_s: float | None
+    mt_completed_s: float | None
+    translated_text: str
+    tts_first_byte_s: float | None
+    tts_completed_s: float | None
+    tts_audio_format: str
+    mt_to_first_audio_s: float | None
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.mt_to_first_audio_s is not None and not self.error
+
+
+@dataclass
+class _EarlyTTSState:
+    """measure_mt_to_early_tts 的中间状态。"""
+
+    first_token_s: float | None = None
+    completed_s: float | None = None
+    pieces: list[str] = field(default_factory=list)
+    first_piece_text: str = ""
+    first_tts_task: asyncio.Task[tuple[float, TTSMeasurement]] | None = None
+
+
+@dataclass(frozen=True)
 class E2ESample:
     """一条首段译音 E2E replay 样本。"""
 
@@ -203,6 +232,7 @@ class E2ESample:
     tts_first_byte_s: float | None
     tts_completed_s: float | None
     tts_audio_format: str
+    mt_to_first_audio_s: float | None
     error: str | None = None
 
     @property
@@ -210,8 +240,7 @@ class E2ESample:
         return (
             self.error is None
             and self.asr_final_s is not None
-            and self.mt_completed_s is not None
-            and self.tts_first_byte_s is not None
+            and self.mt_to_first_audio_s is not None
         )
 
     @property
@@ -219,11 +248,10 @@ class E2ESample:
         """语音段闭合后，到首个译音 audio chunk 的处理耗时。"""
         if (
             self.asr_final_s is None
-            or self.mt_completed_s is None
-            or self.tts_first_byte_s is None
+            or self.mt_to_first_audio_s is None
         ):
             return None
-        return self.asr_final_s + self.mt_completed_s + self.tts_first_byte_s
+        return self.asr_final_s + self.mt_to_first_audio_s
 
     @property
     def speech_start_first_audio_s(self) -> float | None:
@@ -364,6 +392,183 @@ async def measure_tts_first_byte(
     )
 
 
+async def measure_mt_to_early_tts(
+    mt_client: _TranslationClient,
+    tts_client: _TTSClient,
+    text: str,
+    *,
+    direction: AudioDirection,
+) -> EarlyTTSMeasurement:
+    """消费 MT delta，并在首个非空 delta 到达后立即启动 TTS。"""
+    started = time.perf_counter()
+    try:
+        state = await _collect_mt_and_start_early_tts(
+            mt_client,
+            tts_client,
+            text,
+            direction=direction,
+            started=started,
+        )
+    except UserFacingError as error:
+        return EarlyTTSMeasurement(
+            mt_first_token_s=None,
+            mt_completed_s=None,
+            translated_text="",
+            tts_first_byte_s=None,
+            tts_completed_s=None,
+            tts_audio_format="",
+            mt_to_first_audio_s=None,
+            error=f"{error.what_happened} | {error.next_action}",
+        )
+    except Exception as error:  # pragma: no cover - 防御网络异常
+        return EarlyTTSMeasurement(
+            mt_first_token_s=None,
+            mt_completed_s=None,
+            translated_text="",
+            tts_first_byte_s=None,
+            tts_completed_s=None,
+            tts_audio_format="",
+            mt_to_first_audio_s=None,
+            error=f"{type(error).__name__}: {error}",
+        )
+
+    state = _ensure_early_tts_started(
+        state,
+        tts_client,
+        direction=direction,
+        started=started,
+    )
+    if state.first_tts_task is None:
+        return _empty_early_tts_measurement(state)
+    tts_started_s, tts = await state.first_tts_task
+    first_audio_s = None
+    if tts.first_byte_s is not None:
+        first_audio_s = tts_started_s + tts.first_byte_s
+    translated_text = (state.first_piece_text + "".join(state.pieces)).strip()
+    return EarlyTTSMeasurement(
+        mt_first_token_s=state.first_token_s,
+        mt_completed_s=state.completed_s,
+        translated_text=translated_text,
+        tts_first_byte_s=tts.first_byte_s,
+        tts_completed_s=tts.completed_s,
+        tts_audio_format=tts.audio_format,
+        mt_to_first_audio_s=first_audio_s,
+        error=tts.error,
+    )
+
+
+async def _collect_mt_and_start_early_tts(
+    mt_client: _TranslationClient,
+    tts_client: _TTSClient,
+    text: str,
+    *,
+    direction: AudioDirection,
+    started: float,
+) -> _EarlyTTSState:
+    """收集 MT delta；首个非空片段立即启动 TTS task。"""
+    state = _EarlyTTSState()
+    iterator = mt_client.stream_translate(text, direction=direction)
+    async for chunk in iterator:  # type: ignore[attr-defined]
+        elapsed = time.perf_counter() - started
+        if chunk.kind == "delta" and chunk.text:
+            _accept_mt_delta(
+                state,
+                tts_client,
+                chunk.text,
+                direction=direction,
+                started=started,
+                elapsed=elapsed,
+            )
+        elif chunk.kind == "completed":
+            state.completed_s = elapsed
+            if chunk.text and not state.pieces and state.first_tts_task is None:
+                state.pieces.append(chunk.text)
+            break
+    return state
+
+
+def _accept_mt_delta(
+    state: _EarlyTTSState,
+    tts_client: _TTSClient,
+    text: str,
+    *,
+    direction: AudioDirection,
+    started: float,
+    elapsed: float,
+) -> None:
+    """处理一个 MT delta，并在首个可播片段出现时启动 TTS。"""
+    if state.first_token_s is None:
+        state.first_token_s = elapsed
+    state.pieces.append(text)
+    if state.first_tts_task is not None:
+        return
+    first_piece = "".join(state.pieces).strip()
+    if not first_piece:
+        return
+    state.first_piece_text = first_piece
+    state.first_tts_task = asyncio.create_task(
+        _measure_tts_piece(
+            tts_client,
+            first_piece,
+            direction=direction,
+            mt_started_at=started,
+        )
+    )
+    state.pieces.clear()
+
+
+def _ensure_early_tts_started(
+    state: _EarlyTTSState,
+    tts_client: _TTSClient,
+    *,
+    direction: AudioDirection,
+    started: float,
+) -> _EarlyTTSState:
+    """如果 MT 只在 completed 返回文本，则退化为 completed 后启动 TTS。"""
+    if state.first_tts_task is not None:
+        return state
+    first_piece = "".join(state.pieces).strip()
+    if not first_piece:
+        return state
+    state.first_piece_text = first_piece
+    state.first_tts_task = asyncio.create_task(
+        _measure_tts_piece(
+            tts_client,
+            first_piece,
+            direction=direction,
+            mt_started_at=started,
+        )
+    )
+    state.pieces.clear()
+    return state
+
+
+def _empty_early_tts_measurement(state: _EarlyTTSState) -> EarlyTTSMeasurement:
+    """DeepSeek 没有返回可合成译文时的 fail-closed 记录。"""
+    return EarlyTTSMeasurement(
+        mt_first_token_s=state.first_token_s,
+        mt_completed_s=state.completed_s,
+        translated_text="",
+        tts_first_byte_s=None,
+        tts_completed_s=None,
+        tts_audio_format="",
+        mt_to_first_audio_s=None,
+        error="DeepSeek 未返回有效译文。",
+    )
+
+
+async def _measure_tts_piece(
+    client: _TTSClient,
+    text: str,
+    *,
+    direction: AudioDirection,
+    mt_started_at: float,
+) -> tuple[float, TTSMeasurement]:
+    """测量单个 early TTS 片段，并返回其相对 MT 起点的启动时刻。"""
+    tts_started_s = time.perf_counter() - mt_started_at
+    return tts_started_s, await measure_tts_first_byte(client, text, direction=direction)
+
+
 async def measure_e2e_sample(
     *,
     direction: AudioDirection,
@@ -376,7 +581,7 @@ async def measure_e2e_sample(
     mt_client: _TranslationClient,
     tts_client: _TTSClient,
 ) -> E2ESample:
-    """串起 ASR → MT completed → TTS first byte，返回单条 E2E 样本。"""
+    """串起 ASR → MT delta early TTS first byte，返回单条 E2E 样本。"""
     try:
         asr_final_s, asr_text = measure_asr(samples, transcriber=transcriber)
     except UserFacingError as error:
@@ -394,6 +599,7 @@ async def measure_e2e_sample(
             tts_first_byte_s=None,
             tts_completed_s=None,
             tts_audio_format="",
+            mt_to_first_audio_s=None,
             error=f"{error.what_happened} | {error.next_action}",
         )
     except Exception as error:  # pragma: no cover - 防御模型异常
@@ -411,11 +617,17 @@ async def measure_e2e_sample(
             tts_first_byte_s=None,
             tts_completed_s=None,
             tts_audio_format="",
+            mt_to_first_audio_s=None,
             error=f"{type(error).__name__}: {error}",
         )
 
-    mt = await measure_mt(mt_client, asr_text, direction=direction)
-    if not mt.succeeded:
+    early = await measure_mt_to_early_tts(
+        mt_client,
+        tts_client,
+        asr_text,
+        direction=direction,
+    )
+    if not early.succeeded:
         return E2ESample(
             direction=direction,
             source_voice=source_voice,
@@ -424,16 +636,16 @@ async def measure_e2e_sample(
             actual_audio_duration_s=actual_audio_duration_s,
             asr_final_s=asr_final_s,
             asr_text=asr_text,
-            mt_first_token_s=mt.first_token_s,
-            mt_completed_s=mt.completed_s,
-            translated_text=mt.translated_text,
-            tts_first_byte_s=None,
-            tts_completed_s=None,
-            tts_audio_format="",
-            error=mt.error,
+            mt_first_token_s=early.mt_first_token_s,
+            mt_completed_s=early.mt_completed_s,
+            translated_text=early.translated_text,
+            tts_first_byte_s=early.tts_first_byte_s,
+            tts_completed_s=early.tts_completed_s,
+            tts_audio_format=early.tts_audio_format,
+            mt_to_first_audio_s=early.mt_to_first_audio_s,
+            error=early.error,
         )
 
-    tts = await measure_tts_first_byte(tts_client, mt.translated_text, direction=direction)
     return E2ESample(
         direction=direction,
         source_voice=source_voice,
@@ -442,13 +654,14 @@ async def measure_e2e_sample(
         actual_audio_duration_s=actual_audio_duration_s,
         asr_final_s=asr_final_s,
         asr_text=asr_text,
-        mt_first_token_s=mt.first_token_s,
-        mt_completed_s=mt.completed_s,
-        translated_text=mt.translated_text,
-        tts_first_byte_s=tts.first_byte_s,
-        tts_completed_s=tts.completed_s,
-        tts_audio_format=tts.audio_format,
-        error=tts.error,
+        mt_first_token_s=early.mt_first_token_s,
+        mt_completed_s=early.mt_completed_s,
+        translated_text=early.translated_text,
+        tts_first_byte_s=early.tts_first_byte_s,
+        tts_completed_s=early.tts_completed_s,
+        tts_audio_format=early.tts_audio_format,
+        mt_to_first_audio_s=early.mt_to_first_audio_s,
+        error=early.error,
     )
 
 
@@ -535,10 +748,11 @@ def render_report(samples: list[E2ESample], summaries: list[DirectionSummary]) -
     lines.extend(["", "## 样本明细", ""])
     lines.append(
         "| 方向 | 段长 | ASR | MT first | MT done | TTS first "
-        "| 段闭合后首音 | 音频开头首音 | ASR 文本 | 译文 | 错误 |"
+        "| MT到首音 | 段闭合后首音 | 音频开头首音 | ASR 文本 | 译文 | 错误 |"
     )
     lines.append(
-        "|------|------|-----|----------|---------|-----------|--------------|--------------|----------|------|------|"
+        "|------|------|-----|----------|---------|-----------"
+        "|----------|--------------|--------------|----------|------|------|"
     )
     for sample in samples:
         lines.append(
@@ -548,6 +762,7 @@ def render_report(samples: list[E2ESample], summaries: list[DirectionSummary]) -
             f"| {_format_s(sample.mt_first_token_s)} "
             f"| {_format_s(sample.mt_completed_s)} "
             f"| {_format_s(sample.tts_first_byte_s)} "
+            f"| {_format_s(sample.mt_to_first_audio_s)} "
             f"| {_format_s(sample.post_segment_first_audio_s)} "
             f"| {_format_s(sample.speech_start_first_audio_s)} "
             f"| {_escape_cell(sample.asr_text)} "
@@ -571,7 +786,8 @@ def proof_payload(
         "definitions": {
             "post_segment_first_audio_s": "speech segment closed -> first translated audio chunk",
             "speech_start_first_audio_s": "input audio start -> first translated audio chunk proxy",
-            "current_pipeline_order": "ASR final -> MT completed -> TTS first byte",
+            "mt_to_first_audio_s": "MT request start -> first translated audio chunk",
+            "current_pipeline_order": "ASR final -> MT delta early TTS first byte",
         },
         "settings": {
             "model_name": settings.resolved_whisper_model_name(),
@@ -609,6 +825,7 @@ def proof_payload(
                 "tts_first_byte_s": sample.tts_first_byte_s,
                 "tts_completed_s": sample.tts_completed_s,
                 "tts_audio_format": sample.tts_audio_format,
+                "mt_to_first_audio_s": sample.mt_to_first_audio_s,
                 "post_segment_first_audio_s": sample.post_segment_first_audio_s,
                 "speech_start_first_audio_s": sample.speech_start_first_audio_s,
                 "error": sample.error,

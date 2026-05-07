@@ -3,7 +3,7 @@
 **日期**：2026-05-05
 **Git commit**：当前 HEAD；本报告不内嵌自引用提交哈希，使用 `git log -1 --oneline` 核验
 **硬件**：本地 M3 + Metal + Piper 默认路径；BlackHole / Teams 真机会话仍需发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"已被逐步替换为真实测量。2026-05-07 已完成 BM-4 / BM-6 子段真实化、ASR C+α 测量，以及 BM-10 / BM-10D 无人值守 E2E replay。结论从"有望进入 1200 ms 硬阈值"修正为：**当前生产顺序 ASR final → MT completed → TTS first byte 下，BM-10 / BM-10D p50 均 Fail**。上行段闭合后首音 p50 1720.0 ms / p95 1817.3 ms；下行段闭合后首音 p50 1657.9 ms / p95 1959.0 ms，均超过 SC-001 / SC-002 p50 ≤ 1200 ms 硬阈值。若从合成输入音频开头算代理口径，上行 p50 5310.5 ms / p95 10342.9 ms、下行 p50 5189.1 ms / p95 7616.2 ms，说明整段 ASR 边界本身不适合作为"远端开口/本端开口到首音"承诺。Piper 仍让 BM-6 子段通过（最差方向 p50 121.4 ms / p95 183.1 ms），但仅替换 TTS 不足以让当前端到端生产顺序达标；下一步必须优化 MT completed 前启动 TTS、缩短切段/引入可证明的 streaming ASR，或触发阈值/范围重审。
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"已被逐步替换为真实测量。2026-05-07 已完成 BM-4 / BM-6 子段真实化、ASR C+α 测量、BM-10 / BM-10D 无人值守 E2E replay，以及 MT delta → early TTS 启动优化后的 Stage 5c 复测。结论从"有望进入 1200 ms 硬阈值"修正为：**early TTS 明显改善首音，但 BM-10 上行仍 Fail，BM-10D 下行已 Pass**。优化后上行段闭合后首音 p50 1565.5 ms / p95 1594.4 ms，仍超过 SC-001 p50 ≤ 1200 ms 硬阈值；下行段闭合后首音 p50 904.8 ms / p95 1784.6 ms，满足 SC-002 硬阈值和 p95 ≤ 2000 ms。若从合成输入音频开头算代理口径，上行 p50 5187.9 ms / p95 10091.0 ms、下行 p50 4665.5 ms / p95 6863.1 ms，说明整段 ASR 边界本身仍不适合作为"远端开口/本端开口到首音"承诺。Piper 仍让 BM-6 子段通过；early TTS 关闭了"等待 MT completed 后才启动 TTS"这一结构性问题，但发布仍被 BM-10 上行阻断。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
@@ -16,8 +16,8 @@
 | BM-7 | Edge-TTS 稳定性 | 401/403 失败率 0.1% | < 0.5% | Pass | 无 |
 | BM-8 | AUDIO_ROUTE | BlackHole 路由 p95 18 ms | ≤ 50 ms | Pass | 无 |
 | BM-9 | SC-002 | Aggregate jitter p95 8 ms | ≤ 10 ms | Pass | 无 |
-| BM-10 | SC-001 | 上行 E2E replay：段闭合后首音 p50 1720.0 ms / p95 1817.3 ms；音频开头代理 p50 5310.5 ms / p95 10342.9 ms（Stage 5b，无人值守） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | **Fail (p50)** | 阻断发布；当前生产顺序等待 MT completed 后才启动 TTS，需改为更早启动 TTS / 缩短切段 / 重审阈值 |
-| BM-10D | SC-002 | 下行 E2E replay：段闭合后首音 p50 1657.9 ms / p95 1959.0 ms；音频开头代理 p50 5189.1 ms / p95 7616.2 ms（Stage 5b，无人值守） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | **Fail (p50)** | 阻断发布；同 BM-10，且 p95 仅贴近 2000 ms 上限 |
+| BM-10 | SC-001 | 上行 early TTS E2E replay：段闭合后首音 p50 1565.5 ms / p95 1594.4 ms；音频开头代理 p50 5187.9 ms / p95 10091.0 ms（Stage 5c，无人值守） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | **Fail (p50)** | 阻断发布；early TTS 已关闭 MT completed 等待，剩余方向是缩短上行切段 / 降低 ASR 抖动 / 优化首片 TTS cold start |
+| BM-10D | SC-002 | 下行 early TTS E2E replay：段闭合后首音 p50 904.8 ms / p95 1784.6 ms；音频开头代理 p50 4665.5 ms / p95 6863.1 ms（Stage 5c，无人值守） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | Pass | 下行已进入硬阈值并满足软目标 p50；仍需真机 Teams/BlackHole 复跑 |
 | BM-11 | SC-003 | 整段 p50 1800 ms / p95 3200 ms | p50 ≤ 2.5 s / p95 ≤ 4.0 s | Pass | 无 |
 | BM-12 | SC-004 | 60 分钟用户感知中断 0 次 | = 0 | Pass | 无 |
 | BM-13 | SC-004 / 宪章 IV | 24h 内存增长 2.5% | ≤ 5% | Pass | 无 |
@@ -300,6 +300,34 @@ Stage 4 阶段用 MT first token + Piper first byte 做过乐观子段估算：
 3. **从音频开头算的代理口径不可达**：当前整段 ASR 必须等语音段闭合；长段会天然把"开口到首音"推到 5-10 s。若 SC-001 / SC-002 要按开口时刻理解，必须引入可证明的 streaming ASR / early prepare，不应继续用整段 ASR 口径声明达标。
 
 **退出动作**：BM-10 / BM-10D 当前阻断发布。优先修复方向是让 TTS 在 MT completed 前获得可播文本（例如基于 delta 的句片段缓冲 / early TTS）并重新 replay；若仍不达标，再评估切段策略、真正 streaming ASR 或 SC-001 / SC-002 阈值重审。
+
+### Stage 5c：MT delta → early TTS 启动优化复测
+
+**日期**：2026-05-07  
+**命令入口**：`uv run --extra dev scripts/measure_e2e_first_segment.py --samples-per-direction 3 --config config.toml --proof-json /tmp/tvi-e2e-first-segment-early-tts.json`  
+**口径**：`LiveSayBridge.prepare(streaming=True)` 不再等待 MT completed；首个非空 MT delta 到达后，后台 producer 立即启动 TTS/PCM，剩余 delta 继续顺序补播。replay 脚本同步改为 **ASR final → MT delta early TTS first byte** 口径。
+
+| 方向 | 成功 | 失败 | 段闭合后 p50 | 段闭合后 p95 | 从音频开头 p50 | 从音频开头 p95 | 结论 |
+|------|------|------|-------------|-------------|---------------|---------------|------|
+| 上行 BM-10 | 3 | 0 | 1565.5 ms | 1594.4 ms | 5187.9 ms | 10091.0 ms | **Fail：p50 > 1200 ms** |
+| 下行 BM-10D | 3 | 0 | 904.8 ms | 1784.6 ms | 4665.5 ms | 6863.1 ms | Pass |
+
+| 方向 | 段长 | ASR | MT first | MT done | TTS first | MT 到首音 | 段闭合后首音 | 音频开头首音 |
+|------|------|-----|----------|---------|-----------|-----------|--------------|--------------|
+| uplink | 1.988 s | 0.302 s | 0.585 s | 1.255 s | 0.707 s | 1.292 s | 1.594 s | 3.582 s |
+| uplink | 4.022 s | 0.381 s | 0.729 s | 0.789 s | 0.055 s | 0.785 s | 1.166 s | 5.188 s |
+| uplink | 8.526 s | 0.857 s | 0.579 s | 1.012 s | 0.129 s | 0.708 s | 1.565 s | 10.091 s |
+| downlink | 1.560 s | 0.277 s | 0.467 s | 1.466 s | 1.041 s | 1.508 s | 1.785 s | 3.345 s |
+| downlink | 3.841 s | 0.313 s | 0.462 s | 0.838 s | 0.050 s | 0.512 s | 0.825 s | 4.666 s |
+| downlink | 5.958 s | 0.333 s | 0.524 s | 0.901 s | 0.047 s | 0.571 s | 0.905 s | 6.863 s |
+
+**效果对比**：
+
+- 上行 p50：1720.0 ms → 1565.5 ms，改善 154.5 ms，但仍 Fail。
+- 下行 p50：1657.9 ms → 904.8 ms，改善 753.1 ms，转为 Pass。
+- 下行证明 early TTS 能关闭 MT completed 等待造成的结构性延迟；上行剩余问题主要来自长句 ASR 抖动（0.857 s）和首片 TTS cold start / MT first token 组合。
+
+**后续动作**：发布仍被 BM-10 上行阻断。下一步优先缩短上行切段（降低长句 ASR 与音频开头代理延迟），并把 Piper voice 预热 / client 复用纳入 production smoke，再复跑 Stage 5c。
 
 ## 冷启动与分发形态合规
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 
 import numpy as np
@@ -232,7 +233,7 @@ def test_decode_tts_events_handles_piper_pcm_chunks() -> None:
 def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  # type: ignore[no-untyped-def]
     monkeypatch,
 ) -> None:
-    """实时 streaming 路径必须给 Edge-TTS 留一次重试，避免短句空音频段被直接丢弃。"""
+    """实时 streaming 路径必须把 TTS retry 参数传给 early PCM producer。"""
     captured: dict[str, object] = {}
 
     class _FakeDeepSeek:
@@ -254,8 +255,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
             return "sk-test"
 
     async def _fake_pcm() -> AsyncIterator[np.ndarray]:
-        if False:  # pragma: no cover - empty async iterator for spy
-            yield np.array([], dtype=np.int16)
+        yield np.array([1, 2], dtype=np.int16)
 
     def _spy(**kwargs: object) -> AsyncIterator[np.ndarray]:
         captured.update(kwargs)
@@ -263,7 +263,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
 
     monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
     monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
-    monkeypatch.setattr(live_say, "start_pcm_stream_with_retry", _spy)
+    monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _spy)
     monkeypatch.setattr(
         LiveSayBridge,
         "_target_device",
@@ -271,7 +271,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
     )
 
     bridge = LiveSayBridge.__new__(LiveSayBridge)
-    asyncio.run(
+    prepared = asyncio.run(
         bridge.prepare(
             "你好",
             direction=AudioDirection.UPLINK,
@@ -279,8 +279,68 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
             streaming=True,
         )
     )
+    pcm = asyncio.run(prepared.pcm_iterator.__anext__())
 
     assert captured["max_retries"] == 1
+    assert captured["target_text"] == "Hello"
+    assert pcm.tolist() == [1, 2]
+
+
+def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """首个 MT delta 到达后 prepare 应可返回，不再等待 completed。"""
+    release_completed = threading.Event()
+
+    class _SlowCompletedDeepSeek:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction, context_text
+            yield TranslationChunk(kind="delta", text="Hello")
+            await asyncio.to_thread(release_completed.wait)
+            yield TranslationChunk(kind="completed", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
+        del kwargs
+        yield np.array([1], dtype=np.int16)
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _SlowCompletedDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _fake_pcm)
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    try:
+        prepared = asyncio.run(
+            asyncio.wait_for(
+                bridge.prepare(
+                    "你好",
+                    direction=AudioDirection.UPLINK,
+                    target="default",
+                    streaming=True,
+                ),
+                timeout=1.0,
+            )
+        )
+    finally:
+        release_completed.set()
+
+    assert prepared.target_text == "Hello"
 
 
 def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: ignore[no-untyped-def]
@@ -332,8 +392,8 @@ def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: 
     assert "丢弃" in exc.value.next_action
 
 
-def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """多次 prepare 必须复用同一个 httpx.AsyncClient，省掉每次 DeepSeek 调用的 TLS 握手。"""
+def test_prepare_reuses_single_httpx_client_across_nonstreaming_calls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """非 streaming prepare 仍复用同一个 httpx.AsyncClient，省掉 DeepSeek TLS 握手。"""
     captured_http_clients: list[object] = []
 
     class _FakeDeepSeek:
@@ -355,13 +415,23 @@ def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
 
-    async def _fake_pcm() -> AsyncIterator[np.ndarray]:
-        if False:  # pragma: no cover - empty async iterator for spy
-            yield np.array([], dtype=np.int16)
+    async def _fake_synthesize(*args: object, **kwargs: object) -> list[TTSEvent]:
+        del args, kwargs
+        return [
+            TTSEvent(
+                kind="first_byte",
+                audio_chunk=np.array([1], dtype="<i2").tobytes(),
+                audio_format="pcm_s16le_16000",
+            )
+        ]
 
     monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
     monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
-    monkeypatch.setattr(live_say, "start_pcm_stream_with_retry", lambda **_: _fake_pcm())
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_synthesize_with_retry",
+        _fake_synthesize,
+    )
     monkeypatch.setattr(
         LiveSayBridge,
         "_target_device",
@@ -374,7 +444,6 @@ def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  
             "你好",
             direction=AudioDirection.UPLINK,
             target="default",
-            streaming=True,
         )
     )
     asyncio.run(
@@ -382,7 +451,6 @@ def test_prepare_reuses_single_httpx_client_across_calls(monkeypatch) -> None:  
             "再见",
             direction=AudioDirection.UPLINK,
             target="default",
-            streaming=True,
         )
     )
 
