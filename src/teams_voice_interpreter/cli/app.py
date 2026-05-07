@@ -791,20 +791,46 @@ def _warn_online_asr_early_prepare_if_disabled(
         )
 
 
+def _close_live_bridge(bridge: LivePushToTalkBridge) -> None:
+    """关闭真实 bridge 的后台资源；测试 fake bridge 没有 close 时跳过。"""
+    close = getattr(bridge, "close", None)
+    if callable(close):
+        close()
+
+
 class _PlaybackGate:
     """临时抑制下行，避免单 BlackHole 配置把上行译音重新识别成下行。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._suppressed_until = 0.0
+        self._active_playbacks = 0
 
-    def suppress_for(self, seconds: float) -> None:
+    def suppress_for(self, seconds: float) -> float:
         with self._lock:
-            self._suppressed_until = max(self._suppressed_until, time.perf_counter() + seconds)
+            deadline = time.perf_counter() + seconds
+            self._suppressed_until = max(self._suppressed_until, deadline)
+            return self._suppressed_until
+
+    def begin_playback_suppression(self, *, hard_cap_seconds: float) -> None:
+        """播放期间强制抑制；hard cap 只兜底异常退出未释放的情况。"""
+        with self._lock:
+            self._active_playbacks += 1
+            self._suppressed_until = max(
+                self._suppressed_until,
+                time.perf_counter() + hard_cap_seconds,
+            )
+
+    def finish_playback_suppression(self, *, tail_seconds: float) -> None:
+        """播放结束后释放 active 状态，仅保留尾部缓冲。"""
+        with self._lock:
+            self._active_playbacks = max(0, self._active_playbacks - 1)
+            if self._active_playbacks == 0:
+                self._suppressed_until = time.perf_counter() + tail_seconds
 
     def is_suppressed(self) -> bool:
         with self._lock:
-            return time.perf_counter() < self._suppressed_until
+            return self._active_playbacks > 0 or time.perf_counter() < self._suppressed_until
 
 
 class _AsyncLoopRunner:
@@ -993,6 +1019,7 @@ def _run_listen_pipeline(
             if not playback_stop_sent:
                 playback_queue.put(None)
             playback_worker.join()
+        _close_live_bridge(bridge)
         async_runner.close()
 
 
@@ -1177,6 +1204,7 @@ def _run_online_listen_pipeline(
     finally:
         playback_queue.put(None)
         playback_worker.join()
+        _close_live_bridge(bridge)
         async_runner.close()
 
 
@@ -2109,15 +2137,18 @@ def _listen_playback_worker(
                     f"{stale_window_s:.2f}s。"
                 )
                 continue
+            suppression_started = False
             if suppress_downlink_on_playback and playback_gate is not None:
-                playback_gate.suppress_for(
-                    _playback_gate_suppression_seconds(
+                playback_gate.begin_playback_suppression(
+                    hard_cap_seconds=_playback_gate_suppression_seconds(
                         item.prepared,
                         max_playback_seconds=REALTIME_MAX_PLAYBACK_SECONDS,
                     )
-                    + 0.8
+                    + 0.8,
                 )
+                suppression_started = True
             playback_started = time.perf_counter()
+            playback_succeeded = False
             try:
                 result = asyncio.run(
                     _play_prepared_for_listen(
@@ -2126,9 +2157,14 @@ def _listen_playback_worker(
                         max_playback_seconds=REALTIME_MAX_PLAYBACK_SECONDS,
                     )
                 )
+                playback_succeeded = True
             except UserFacingError as error:
                 typer.echo(f"{_display_index(item.label, item.index)} {error}")
                 continue
+            finally:
+                if playback_gate is not None and suppression_started:
+                    tail_seconds = 0.8 if playback_succeeded else 0.0
+                    playback_gate.finish_playback_suppression(tail_seconds=tail_seconds)
             completed_at = time.perf_counter()
             typer.echo(
                 f"{_display_index(item.label, item.index)} "
@@ -2365,6 +2401,8 @@ def _looks_like_route_device_name(
 def _prepared_audio_seconds(prepared: PreparedSayResult) -> float:
     if prepared.pcm.size > 0:
         return float(prepared.pcm.size) / 16000
+    if prepared.pcm_iterator is not None:
+        return 10.0
     return min(10.0, max(1.0, len(prepared.target_text) / 8.0))
 
 

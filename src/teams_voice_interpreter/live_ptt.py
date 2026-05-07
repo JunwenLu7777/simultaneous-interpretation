@@ -665,6 +665,12 @@ class LivePushToTalkBridge:
         )
         self.say_bridge = say_bridge or LiveSayBridge()
 
+    def close(self) -> None:
+        """释放下游翻译/TTS 桥持有的后台资源。"""
+        close = getattr(self.say_bridge, "close", None)
+        if callable(close):
+            close()
+
     async def run(
         self,
         *,

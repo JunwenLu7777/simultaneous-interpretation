@@ -226,8 +226,61 @@ def test_proof_payload_records_pipeline_order_and_samples() -> None:
     assert payload["schema_version"] == 1
     definitions = payload["definitions"]
     assert definitions["current_pipeline_order"] == "ASR final -> MT delta early TTS first byte"
+    assert payload["settings"]["tts_prewarm_mode"] == "none"
     written_samples = payload["samples"]
     assert written_samples[0]["post_segment_first_audio_s"] == pytest.approx(1.0)
+
+
+async def test_run_measurement_prewarm_tts_when_requested(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """显式 prewarm replay 口径必须随 MT 测量并发预热对应 voice。"""
+    prewarmed: list[AudioDirection] = []
+
+    def fake_synthesize(
+        *,
+        voice: str,
+        text: str,
+        output_path: Path,
+        target_rate_hz: int,
+    ) -> None:
+        del voice, text, target_rate_hz
+        output_path.write_bytes(b"fake-wav")
+
+    def fake_load(path: Path, *, target_rate_hz: int) -> tuple[np.ndarray, float]:
+        del path, target_rate_hz
+        return np.ones(160, dtype=np.int16), 2.0
+
+    monkeypatch.setattr(measure, "synthesize_say_wav", fake_synthesize)
+    monkeypatch.setattr(measure, "load_wav_mono_int16", fake_load)
+    monkeypatch.setattr(measure, "WhisperOneShotTranscriber", _FakeTranscriber)
+    monkeypatch.setattr(measure, "DeepSeekStreamingClient", lambda **kwargs: _FakeMTClient())
+    monkeypatch.setattr(measure, "build_tts_client", lambda settings: _FakeTTSClient())
+    monkeypatch.setattr(
+        measure,
+        "prewarm_tts_client",
+        lambda settings, *, direction: prewarmed.append(direction),
+    )
+
+    records = await measure.run_measurement(
+        settings=Settings(deepseek_api_key="fake"),
+        samples_per_direction=1,
+        sample_rate_hz=16000,
+        workdir=tmp_path / "wav",
+        prewarm_tts=True,
+    )
+
+    assert prewarmed == [AudioDirection.UPLINK, AudioDirection.DOWNLINK]
+    assert len(records) == 2
+    payload = measure.proof_payload(
+        records,
+        [measure.summarize(records, direction=AudioDirection.UPLINK)],
+        settings=Settings(deepseek_api_key="fake"),
+        sample_rate_hz=16000,
+        prewarm_tts=True,
+    )
+    assert payload["settings"]["tts_prewarm_mode"] == "mt_concurrent_voice_prewarm"
 
 
 def test_write_proof_json_round_trip(tmp_path: Path) -> None:

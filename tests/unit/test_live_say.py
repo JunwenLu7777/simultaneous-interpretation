@@ -352,6 +352,149 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
     assert prepared.target_text == "Hello"
 
 
+def test_prepare_streaming_cancels_first_tts_when_mt_fails_after_delta(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """MT 首个 delta 后失败时，已启动的 early TTS 必须取消，不能继续吐 PCM。"""
+    cancelled = threading.Event()
+
+    class _FailingAfterDeltaDeepSeek:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction, context_text
+            yield TranslationChunk(kind="delta", text="Hello")
+            await asyncio.sleep(0.05)
+            raise live_say.DeepSeekError(
+                code="mt.network_error",
+                what_happened="发生了什么：DeepSeek 网络请求失败。",
+                next_action="下一步如何做：下一段会自动重试。",
+            )
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+        tts_engine = "edge_tts"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _blocked_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
+        del kwargs
+        try:
+            await asyncio.sleep(10)
+            yield np.array([99], dtype=np.int16)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FailingAfterDeltaDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _blocked_pcm)
+    monkeypatch.setattr(live_say, "prewarm_tts_client", lambda settings, *, direction: None)
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    prepared = asyncio.run(
+        bridge.prepare(
+            "你好",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+
+    with pytest.raises(live_say.DeepSeekError):
+        asyncio.run(asyncio.wait_for(prepared.pcm_iterator.__anext__(), timeout=1.0))
+    assert cancelled.wait(timeout=1.0)
+
+
+def test_prepare_streaming_reuses_deepseek_http_client(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """streaming producer 应在持久 runtime loop 内复用 DeepSeek HTTP client。"""
+    http_clients: list[object] = []
+
+    class _FakeDeepSeek:
+        def __init__(
+            self,
+            *args: object,
+            http_client: object = None,
+            **kwargs: object,
+        ) -> None:
+            del args, kwargs
+            http_clients.append(http_client)
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction, context_text
+            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="completed", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+        tts_engine = "edge_tts"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
+        del kwargs
+        yield np.array([1], dtype=np.int16)
+
+    async def _drain(iterator: AsyncIterator[np.ndarray]) -> None:
+        async for _ in iterator:
+            pass
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _fake_pcm)
+    monkeypatch.setattr(live_say, "prewarm_tts_client", lambda settings, *, direction: None)
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    first = asyncio.run(
+        bridge.prepare(
+            "你好",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+    asyncio.run(_drain(first.pcm_iterator))
+    second = asyncio.run(
+        bridge.prepare(
+            "再见",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+    asyncio.run(_drain(second.pcm_iterator))
+
+    assert http_clients[0] is not None
+    assert http_clients[0] is http_clients[1]
+    runtime = bridge._early_runtime
+    assert runtime is not None
+    assert runtime._thread.is_alive()
+
+    bridge.close()
+
+    assert bridge._early_runtime is None
+    assert not runtime._thread.is_alive()
+
+
 def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: ignore[no-untyped-def]
     monkeypatch,
 ) -> None:

@@ -329,11 +329,11 @@ Stage 4 阶段用 MT first token + Piper first byte 做过乐观子段估算：
 
 **后续动作**：发布仍被 BM-10 上行阻断。下一步优先缩短上行切段（降低长句 ASR 与音频开头代理延迟），并把 Piper voice 预热 / client 复用纳入 production smoke，再复跑 Stage 5c。
 
-### Stage 5d：Piper client cache + voice 预热复测
+### Stage 5d：Piper client cache 复测
 
 **日期**：2026-05-07  
 **命令入口**：`uv run --extra dev scripts/measure_e2e_first_segment.py --samples-per-direction 3 --config config.toml --proof-json /tmp/tvi-e2e-first-segment-piper-warm.json`  
-**口径**：在 Stage 5c early TTS 基础上，`build_tts_client(settings)` 按 Piper 模型目录复用 `PiperClient`，replay 脚本验证同进程连续片段不再重复加载 ONNX；生产 `LiveSayBridge.prepare(streaming=True)` 还会在等待 MT delta 期间后台调用 `prewarm_tts_client(settings, direction=...)`，提前加载当前方向 voice。
+**口径**：在 Stage 5c early TTS 基础上，replay 脚本串行复用同一个 `build_tts_client(settings)` 返回的 `PiperClient`，验证同进程连续片段不再重复加载 ONNX。本轮命令未启用显式 `--prewarm-tts`，因此下表只证明 cached-process 行为，不证明生产 `LiveSayBridge.prepare(streaming=True)` 的后台 voice 预热效果。
 
 | 方向 | 成功 | 失败 | 段闭合后 p50 | 段闭合后 p95 | 从音频开头 p50 | 从音频开头 p95 | 结论 |
 |------|------|------|-------------|-------------|---------------|---------------|------|
@@ -353,9 +353,9 @@ Stage 4 阶段用 MT first token + Piper first byte 做过乐观子段估算：
 
 - 上行 p50：1565.5 ms → 971.3 ms，改善 594.2 ms，转为 Pass。
 - 下行 p50：904.8 ms → 929.7 ms，基本持平，仍 Pass；p95 从 1784.6 ms 降到 1389.9 ms。
-- 首片 TTS cold start 仍可见于每方向第一条短句（0.763 s / 0.619 s），但复用后的后续片段稳定在 31-55 ms；p50 因此回到软目标内。
+- 首片 TTS cold start 仍可见于每方向第一条短句（0.763 s / 0.619 s），说明本轮证据不是 production prewarm 口径；复用后的后续片段稳定在 31-55 ms，p50 因此回到软目标内。
 
-**后续动作**：BM-10 / BM-10D 的无人值守门禁已恢复为通过。发布前应补一次真实 `tvi doctor` + `tvi duplex/listen --show-latency` smoke，确认 Teams / BlackHole 设备路由没有引入额外抖动。
+**后续动作**：BM-10 / BM-10D 的无人值守 cache 口径已恢复为通过。若要单独证明生产同构的 MT 并发 voice prewarm，应使用更新后的 replay 工具加 `--prewarm-tts` 生成独立 proof；发布前仍需补一次真实 `tvi doctor` + `tvi duplex/listen --show-latency` smoke，确认 Teams / BlackHole 设备路由没有引入额外抖动。
 
 ## 冷启动与分发形态合规
 

@@ -30,7 +30,8 @@ import statistics
 import subprocess
 import time
 import wave
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -43,7 +44,7 @@ from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.live_ptt import WhisperOneShotTranscriber
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient
-from teams_voice_interpreter.tts.factory import build_tts_client
+from teams_voice_interpreter.tts.factory import build_tts_client, prewarm_tts_client
 
 _UPLINK_VOICE = "Tingting"
 _DOWNLINK_VOICE = "Samantha"
@@ -398,9 +399,13 @@ async def measure_mt_to_early_tts(
     text: str,
     *,
     direction: AudioDirection,
+    prewarm_tts: Callable[[], None] | None = None,
 ) -> EarlyTTSMeasurement:
     """消费 MT delta，并在首个非空 delta 到达后立即启动 TTS。"""
     started = time.perf_counter()
+    prewarm_task: asyncio.Task[None] | None = None
+    if prewarm_tts is not None:
+        prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_tts))
     try:
         state = await _collect_mt_and_start_early_tts(
             mt_client,
@@ -410,6 +415,7 @@ async def measure_mt_to_early_tts(
             started=started,
         )
     except UserFacingError as error:
+        await _cancel_prewarm_task(prewarm_task)
         return EarlyTTSMeasurement(
             mt_first_token_s=None,
             mt_completed_s=None,
@@ -421,6 +427,7 @@ async def measure_mt_to_early_tts(
             error=f"{error.what_happened} | {error.next_action}",
         )
     except Exception as error:  # pragma: no cover - 防御网络异常
+        await _cancel_prewarm_task(prewarm_task)
         return EarlyTTSMeasurement(
             mt_first_token_s=None,
             mt_completed_s=None,
@@ -439,7 +446,9 @@ async def measure_mt_to_early_tts(
         started=started,
     )
     if state.first_tts_task is None:
+        await _await_prewarm_task(prewarm_task)
         return _empty_early_tts_measurement(state)
+    await _await_prewarm_task(prewarm_task)
     tts_started_s, tts = await state.first_tts_task
     first_audio_s = None
     if tts.first_byte_s is not None:
@@ -455,6 +464,21 @@ async def measure_mt_to_early_tts(
         mt_to_first_audio_s=first_audio_s,
         error=tts.error,
     )
+
+
+async def _await_prewarm_task(task: asyncio.Task[None] | None) -> None:
+    """等待与 MT 并发启动的 voice prewarm；无 prewarm 时直接返回。"""
+    if task is not None:
+        await task
+
+
+async def _cancel_prewarm_task(task: asyncio.Task[None] | None) -> None:
+    """MT 失败时取消 replay 预热任务，避免后台测试任务泄漏。"""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 async def _collect_mt_and_start_early_tts(
@@ -580,6 +604,7 @@ async def measure_e2e_sample(
     transcriber: WhisperOneShotTranscriber,
     mt_client: _TranslationClient,
     tts_client: _TTSClient,
+    prewarm_tts: Callable[[], None] | None = None,
 ) -> E2ESample:
     """串起 ASR → MT delta early TTS first byte，返回单条 E2E 样本。"""
     try:
@@ -626,6 +651,7 @@ async def measure_e2e_sample(
         tts_client,
         asr_text,
         direction=direction,
+        prewarm_tts=prewarm_tts,
     )
     if not early.succeeded:
         return E2ESample(
@@ -778,6 +804,7 @@ def proof_payload(
     *,
     settings: Settings,
     sample_rate_hz: int,
+    prewarm_tts: bool = False,
 ) -> dict[str, object]:
     """生成 proof JSON payload。"""
     return {
@@ -794,6 +821,7 @@ def proof_payload(
             "deepseek_model": settings.deepseek_model,
             "tts_engine": settings.tts_engine,
             "piper_models_dir": str(settings.resolved_piper_models_dir()),
+            "tts_prewarm_mode": "mt_concurrent_voice_prewarm" if prewarm_tts else "none",
         },
         "sample_rate_hz": sample_rate_hz,
         "summaries": [
@@ -857,12 +885,26 @@ def _planned_samples(
         yield AudioDirection.DOWNLINK, voice, text, "en", target_seconds
 
 
+def _make_tts_prewarm_callback(
+    settings: Settings,
+    *,
+    direction: AudioDirection,
+) -> Callable[[], None]:
+    """生成与 MT 计时并发执行的 voice prewarm callback。"""
+
+    def callback() -> None:
+        prewarm_tts_client(settings, direction=direction)
+
+    return callback
+
+
 async def run_measurement(
     *,
     settings: Settings,
     samples_per_direction: int,
     sample_rate_hz: int,
     workdir: Path,
+    prewarm_tts: bool = False,
 ) -> list[E2ESample]:
     """按计划串行测量所有样本。"""
     workdir.mkdir(parents=True, exist_ok=True)
@@ -875,6 +917,9 @@ async def run_measurement(
     records: list[E2ESample] = []
 
     for direction, voice, text, language, target_seconds in _planned_samples(samples_per_direction):
+        prewarm_callback: Callable[[], None] | None = None
+        if prewarm_tts:
+            prewarm_callback = _make_tts_prewarm_callback(settings, direction=direction)
         wav_name = f"{direction.value}_{voice}_{int(target_seconds * 10):04d}.wav"
         wav_path = workdir / wav_name
         synthesize_say_wav(
@@ -902,6 +947,7 @@ async def run_measurement(
                 transcriber=transcriber,
                 mt_client=mt_client,
                 tts_client=tts_client,
+                prewarm_tts=prewarm_callback,
             )
         )
     return records
@@ -920,6 +966,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--config", type=Path, default=None, help="本地 config.toml 路径。")
     parser.add_argument("--proof-json", type=Path, default=None, help="写出测量 proof JSON。")
+    parser.add_argument(
+        "--prewarm-tts",
+        action="store_true",
+        help="MT 计时开始时并发预热 TTS voice，并在 proof JSON 标记口径。",
+    )
     args = parser.parse_args(argv)
 
     max_per_direction = min(len(_UPLINK_SAMPLES), len(_DOWNLINK_SAMPLES))
@@ -942,6 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             samples_per_direction=args.samples_per_direction,
             sample_rate_hz=args.sample_rate_hz,
             workdir=args.workdir,
+            prewarm_tts=args.prewarm_tts,
         )
     )
     summaries = [
@@ -957,6 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
                 summaries,
                 settings=settings,
                 sample_rate_hz=args.sample_rate_hz,
+                prewarm_tts=args.prewarm_tts,
             ),
         )
     return 0 if all(record.succeeded for record in records) else 1

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import queue
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import cast
@@ -106,6 +107,8 @@ class LiveSayBridge:
     def __init__(self, *, device_probe: AudioDeviceProbe | None = None) -> None:
         self.device_probe = device_probe or AudioDeviceProbe()
         self._deepseek_http_client: httpx.AsyncClient | None = None
+        self._deepseek_http_loop: asyncio.AbstractEventLoop | None = None
+        self._early_runtime: _EarlyTranslationRuntime | None = None
 
     def _resolve_deepseek_http_client(self) -> httpx.AsyncClient:
         """Lazy 创建并复用 httpx.AsyncClient，避免每段译音重做 DNS/TLS 握手。"""
@@ -113,7 +116,42 @@ class LiveSayBridge:
         if client is None:
             client = httpx.AsyncClient(timeout=30.0)
             self._deepseek_http_client = client
+            self._deepseek_http_loop = asyncio.get_running_loop()
         return client
+
+    def _resolve_early_runtime(self) -> _EarlyTranslationRuntime:
+        """Lazy 创建 streaming producer runtime，让 MT/TTS 后台任务复用同一事件循环。"""
+        runtime = getattr(self, "_early_runtime", None)
+        if runtime is None:
+            runtime = _EarlyTranslationRuntime()
+            self._early_runtime = runtime
+        return runtime
+
+    async def aclose(self) -> None:
+        """释放 DeepSeek HTTP client 与 streaming runtime。"""
+        client = getattr(self, "_deepseek_http_client", None)
+        if client is not None:
+            owner_loop = getattr(self, "_deepseek_http_loop", None)
+            current_loop = asyncio.get_running_loop()
+            if (
+                owner_loop is not None
+                and owner_loop is not current_loop
+                and owner_loop.is_running()
+            ):
+                close_future = asyncio.run_coroutine_threadsafe(client.aclose(), owner_loop)
+                await asyncio.to_thread(close_future.result, 1.0)
+            else:
+                await client.aclose()
+            self._deepseek_http_client = None
+            self._deepseek_http_loop = None
+        runtime = getattr(self, "_early_runtime", None)
+        if runtime is not None:
+            await asyncio.to_thread(runtime.close)
+            self._early_runtime = None
+
+    def close(self) -> None:
+        """同步释放资源，供 CLI pipeline 的 finally 调用。"""
+        asyncio.run(self.aclose())
 
     async def say(
         self,
@@ -155,6 +193,7 @@ class LiveSayBridge:
                 settings=settings,
                 first_byte_timeout_s=REALTIME_TTS_FIRST_BYTE_TIMEOUT_S,
                 synthesis_timeout_s=REALTIME_TTS_SYNTHESIS_TIMEOUT_S,
+                runtime=self._resolve_early_runtime(),
             )
             try:
                 ready = await pcm_iterator.wait_until_ready(
@@ -372,6 +411,60 @@ class LiveSayBridge:
         )
 
 
+class _EarlyTranslationRuntime:
+    """承载 streaming MT/TTS producer 的持久后台 loop。"""
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._http_client: httpx.AsyncClient | None = None
+        self._closed = False
+        self._thread.start()
+
+    def submit(
+        self, coro: Coroutine[object, object, None]
+    ) -> concurrent.futures.Future[None]:
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def http_client(self) -> httpx.AsyncClient:
+        """在 runtime loop 内创建并复用 DeepSeek HTTP client。"""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
+        return self._http_client
+
+    def close(self) -> None:
+        """关闭 runtime loop 与 loop 内复用的 HTTP client。"""
+        if self._closed:
+            return
+        shutdown = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+        with suppress(concurrent.futures.TimeoutError):
+            shutdown.result(timeout=1.0)
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=1.0)
+        if not self._thread.is_alive():
+            self._loop.close()
+            self._closed = True
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _shutdown(self) -> None:
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+
 class _EarlyTranslationPCMStream:
     """后台把 MT delta 尽早转成 TTS PCM，避免等待 MT completed。"""
 
@@ -384,6 +477,7 @@ class _EarlyTranslationPCMStream:
         settings: Settings,
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
+        runtime: _EarlyTranslationRuntime,
         max_queue_chunks: int = 16,
     ) -> None:
         self._closed = threading.Event()
@@ -393,19 +487,17 @@ class _EarlyTranslationPCMStream:
         self._ready_queue: queue.Queue[_EarlyTranslationReady | BaseException] = queue.Queue(
             maxsize=1
         )
-        self._thread = threading.Thread(
-            target=self._run,
-            kwargs={
-                "source_text": source_text,
-                "direction": direction,
-                "context_text": context_text,
-                "settings": settings,
-                "first_byte_timeout_s": first_byte_timeout_s,
-                "synthesis_timeout_s": synthesis_timeout_s,
-            },
-            daemon=True,
+        self._future = runtime.submit(
+            self._produce(
+                source_text=source_text,
+                direction=direction,
+                context_text=context_text,
+                settings=settings,
+                first_byte_timeout_s=first_byte_timeout_s,
+                synthesis_timeout_s=synthesis_timeout_s,
+                http_client_provider=runtime.http_client,
+            )
         )
-        self._thread.start()
 
     def __aiter__(self) -> _EarlyTranslationPCMStream:
         return self
@@ -441,33 +533,18 @@ class _EarlyTranslationPCMStream:
     async def aclose(self) -> None:
         """停止后台 producer；调用方提前截断或 prepare 失败时释放队列。"""
         self._closed.set()
+        self._future.cancel()
         await asyncio.to_thread(self._drain_pcm_queue)
         try:
             self._pcm_queue.put_nowait(None)
         except queue.Full:
             pass
-        await asyncio.to_thread(self._thread.join, 0.2)
-
-    def _run(
-        self,
-        *,
-        source_text: str,
-        direction: AudioDirection,
-        context_text: str,
-        settings: Settings,
-        first_byte_timeout_s: float,
-        synthesis_timeout_s: float,
-    ) -> None:
-        asyncio.run(
-            self._produce(
-                source_text=source_text,
-                direction=direction,
-                context_text=context_text,
-                settings=settings,
-                first_byte_timeout_s=first_byte_timeout_s,
-                synthesis_timeout_s=synthesis_timeout_s,
-            )
-        )
+        with suppress(
+            asyncio.CancelledError,
+            concurrent.futures.CancelledError,
+            concurrent.futures.TimeoutError,
+        ):
+            await asyncio.to_thread(self._future.result, 0.2)
 
     async def _produce(
         self,
@@ -478,6 +555,7 @@ class _EarlyTranslationPCMStream:
         settings: Settings,
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
+        http_client_provider: Callable[[], httpx.AsyncClient] | None,
     ) -> None:
         translation_started = time.perf_counter()
         mt_first_token_at: float | None = None
@@ -491,42 +569,59 @@ class _EarlyTranslationPCMStream:
             iterator = DeepSeekStreamingClient(
                 api_key=settings.resolved_deepseek_api_key(),
                 model=settings.deepseek_model,
+                http_client=http_client_provider() if http_client_provider is not None else None,
             ).stream_translate(
                 source_text,
                 direction=direction,
                 context_text=context_text,
             )
-            async for chunk in iterator:
-                if chunk.kind == "delta" and chunk.text:
-                    if mt_first_token_at is None:
-                        mt_first_token_at = time.perf_counter()
-                    pending_text = _join_text_delta(pending_text, chunk.text)
-                    if not emitted_first_piece and _is_early_tts_text_ready(pending_text):
-                        emitted_first_piece = True
-                        first_piece = pending_text.strip()
-                        pending_text = ""
-                        self._put_ready(
-                            _EarlyTranslationReady(
-                                target_text=first_piece,
-                                translation_latency_s=time.perf_counter() - translation_started,
-                                mt_first_token_latency_s=(
-                                    mt_first_token_at - translation_started
-                                ),
-                            )
-                        )
-                        first_tts_task = asyncio.create_task(
-                            self._emit_tts_pcm(
-                                first_piece,
-                                direction=direction,
-                                settings=settings,
-                                first_byte_timeout_s=first_byte_timeout_s,
-                                synthesis_timeout_s=synthesis_timeout_s,
-                            )
-                        )
-                elif chunk.kind == "completed":
-                    if chunk.text and not pending_text and not emitted_first_piece:
-                        pending_text = _join_text_delta(pending_text, chunk.text)
-                    break
+            try:
+                async with asyncio.timeout(DEEPSEEK_STREAM_BUDGET_S):
+                    async for chunk in iterator:
+                        if chunk.kind == "delta" and chunk.text:
+                            if mt_first_token_at is None:
+                                mt_first_token_at = time.perf_counter()
+                            pending_text = _join_text_delta(pending_text, chunk.text)
+                            if not emitted_first_piece and _is_early_tts_text_ready(pending_text):
+                                emitted_first_piece = True
+                                first_piece = pending_text.strip()
+                                pending_text = ""
+                                self._put_ready(
+                                    _EarlyTranslationReady(
+                                        target_text=first_piece,
+                                        translation_latency_s=(
+                                            time.perf_counter() - translation_started
+                                        ),
+                                        mt_first_token_latency_s=(
+                                            mt_first_token_at - translation_started
+                                        ),
+                                    )
+                                )
+                                first_tts_task = asyncio.create_task(
+                                    self._emit_tts_pcm(
+                                        first_piece,
+                                        direction=direction,
+                                        settings=settings,
+                                        first_byte_timeout_s=first_byte_timeout_s,
+                                        synthesis_timeout_s=synthesis_timeout_s,
+                                    )
+                                )
+                        elif chunk.kind == "completed":
+                            if chunk.text and not pending_text and not emitted_first_piece:
+                                pending_text = _join_text_delta(pending_text, chunk.text)
+                            break
+            except TimeoutError as error:
+                raise DeepSeekError(
+                    code="mt.stream_budget_exceeded",
+                    what_happened=(
+                        f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内"
+                        "未完成当前译文流；服务端 / 网络抖动，丢弃该段避免阻塞后续。"
+                    ),
+                    next_action=(
+                        "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
+                        "若反复触发，请检查网络或换 DeepSeek 接入点。"
+                    ),
+                ) from error
             await self._finish_pending_translation(
                 pending_text=pending_text,
                 emitted_first_piece=emitted_first_piece,
@@ -540,6 +635,10 @@ class _EarlyTranslationPCMStream:
                 prewarm_task=prewarm_task,
             )
         except Exception as error:
+            if first_tts_task is not None:
+                first_tts_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await first_tts_task
             prewarm_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await prewarm_task

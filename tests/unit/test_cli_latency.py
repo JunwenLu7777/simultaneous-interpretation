@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -118,6 +118,32 @@ def test_listen_latency_reports_timing_inversion_without_clamping(capsys) -> Non
     assert "计时异常" in output
     assert "ASR 0.00s" not in output
     assert "总计 0.00s" not in output
+
+
+def test_streaming_prepared_audio_seconds_uses_conservative_gate_window() -> None:
+    """streaming 译音没有完整 PCM 长度时，回灌抑制不得按首片短译文估算。"""
+
+    async def empty_pcm() -> AsyncIterator[np.ndarray]:
+        if False:  # pragma: no cover - 仅用于构造 async iterator
+            yield np.array([], dtype=np.int16)
+
+    prepared = PreparedSayResult(
+        source_text="你好",
+        target_text="Hi",
+        target_device=AudioDevice(1, "BlackHole 2ch", 0, 2),
+        target="blackhole",
+        translation_latency_s=0.2,
+        tts_latency_s=0.0,
+        decode_latency_s=0.0,
+        pcm=np.array([], dtype=np.int16),
+        pcm_iterator=empty_pcm(),
+    )
+
+    assert cli_app._prepared_audio_seconds(prepared) == 10.0
+    assert (
+        cli_app._playback_gate_suppression_seconds(prepared, max_playback_seconds=3.0)
+        == 3.0
+    )
 
 
 def test_drop_pending_playbacks_preserves_old_burst_by_default() -> None:
@@ -274,6 +300,119 @@ def test_listen_playback_worker_does_not_truncate_by_default(capsys) -> None:  #
     output = capsys.readouterr().out
     assert bridge.say_bridge.max_playback_seconds_values == [None]
     assert "截断" not in output
+
+
+def test_listen_playback_worker_releases_streaming_gate_after_playback() -> None:
+    """streaming 回灌抑制应在真实播放结束后缩短，不能长期压住下行。"""
+
+    async def empty_pcm() -> AsyncIterator[np.ndarray]:
+        if False:  # pragma: no cover - 仅用于构造 async iterator
+            yield np.array([], dtype=np.int16)
+
+    prepared = PreparedSayResult(
+        source_text="hello",
+        target_text="Hi",
+        target_device=AudioDevice(1, "BlackHole 2ch", 0, 2),
+        target="blackhole",
+        translation_latency_s=0.1,
+        tts_latency_s=0.0,
+        decode_latency_s=0.0,
+        pcm=np.array([], dtype=np.int16),
+        pcm_iterator=empty_pcm(),
+    )
+    playback_queue: cli_app.queue.Queue[cli_app._PendingPlayback | None] = cli_app.queue.Queue()
+    playback_queue.put(
+        cli_app._PendingPlayback(
+            index=1,
+            label="上行",
+            prepared=prepared,
+            started=cli_app.time.perf_counter(),
+            transcribed_at=cli_app.time.perf_counter(),
+            prepared_at=cli_app.time.perf_counter(),
+            queue_depth_at_enqueue=0,
+            dropped_pending_before_enqueue=0,
+            show_latency=False,
+        )
+    )
+    playback_queue.put(None)
+    gate = cli_app._PlaybackGate()
+
+    cli_app._listen_playback_worker(
+        playback_queue,
+        _RecordingStreamingBridge(),
+        gate,
+        suppress_downlink_on_playback=True,
+    )
+
+    remaining_s = gate._suppressed_until - cli_app.time.perf_counter()
+    assert 0.0 < remaining_s <= 1.0
+
+
+def test_listen_playback_worker_keeps_gate_active_during_long_streaming_playback() -> None:
+    """streaming 长播放超过 hard cap 时，active playback 仍必须保持下行抑制。"""
+    active_states: list[bool] = []
+    gate = cli_app._PlaybackGate()
+
+    async def empty_pcm() -> AsyncIterator[np.ndarray]:
+        if False:  # pragma: no cover - 仅用于构造 async iterator
+            yield np.array([], dtype=np.int16)
+
+    class LongStreamingSayBridge:
+        async def play_prepared_streaming(
+            self,
+            prepared: PreparedSayResult,
+            *,
+            max_playback_seconds: float | None = None,
+        ) -> SayResult:
+            del max_playback_seconds
+            active_states.append(gate.is_suppressed())
+            gate._suppressed_until = cli_app.time.perf_counter() - 1.0
+            active_states.append(gate.is_suppressed())
+            return SayResult(
+                source_text=prepared.source_text,
+                target_text=prepared.target_text,
+                bytes_written=0,
+                target_device_name=prepared.target_device.name,
+            )
+
+    class LongStreamingBridge:
+        say_bridge = LongStreamingSayBridge()
+
+    prepared = PreparedSayResult(
+        source_text="hello",
+        target_text="Hi",
+        target_device=AudioDevice(1, "BlackHole 2ch", 0, 2),
+        target="blackhole",
+        translation_latency_s=0.1,
+        tts_latency_s=0.0,
+        decode_latency_s=0.0,
+        pcm=np.array([], dtype=np.int16),
+        pcm_iterator=empty_pcm(),
+    )
+    playback_queue: cli_app.queue.Queue[cli_app._PendingPlayback | None] = cli_app.queue.Queue()
+    playback_queue.put(
+        cli_app._PendingPlayback(
+            index=1,
+            label="上行",
+            prepared=prepared,
+            started=cli_app.time.perf_counter(),
+            transcribed_at=cli_app.time.perf_counter(),
+            prepared_at=cli_app.time.perf_counter(),
+            queue_depth_at_enqueue=0,
+            dropped_pending_before_enqueue=0,
+            show_latency=False,
+        )
+    )
+    playback_queue.put(None)
+
+    cli_app._listen_playback_worker(
+        playback_queue,
+        LongStreamingBridge(),
+        gate,
+        suppress_downlink_on_playback=True,
+    )
+
+    assert active_states == [True, True]
 
 
 def test_playback_worker_keeps_stale_item_by_default(capsys) -> None:  # type: ignore[no-untyped-def]
