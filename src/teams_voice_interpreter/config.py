@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     tts_rate: str = "+20%"
+    tts_engine: Literal["edge_tts", "piper"] = "piper"
+    # Piper voice 模型目录（含 `<voice>.onnx` 与 `<voice>.onnx.json`）；
+    # 空字符串回落到 `~/.cache/teams-voice-interpreter/piper-models`。
+    piper_models_dir: str = ""
     uplink_virtual_device_name: str = "BlackHole 2ch"
     downlink_virtual_device_name: str = ""
     allow_shared_virtual_device: bool = False
@@ -47,6 +51,16 @@ class Settings(BaseSettings):
     def silero_vad_model_path(self) -> Path:
         """返回 Silero VAD ONNX 模型缓存路径。"""
         return Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
+
+    def resolved_piper_models_dir(self) -> Path:
+        """返回 Piper voice 模型目录；空配置回落到默认路径。
+
+        默认路径与 `scripts/measure_piper_first_byte.py` 与首次运行向导
+        引导用户下载到的目录一致。
+        """
+        if self.piper_models_dir:
+            return Path(self.piper_models_dir).expanduser()
+        return Path.home() / ".cache/teams-voice-interpreter/piper-models"
 
 
 def load_settings(

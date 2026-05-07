@@ -5,6 +5,13 @@
 deepseek_api_key = "sk-your-deepseek-api-key"
 deepseek_model = "deepseek-chat"
 tts_rate = "+20%"
+# v1 默认 TTS 引擎；piper = 本地 ONNX（推荐：快 7x、零网络、零费用、MIT）；
+# edge_tts = Microsoft Edge 浏览器免费接口（保留作降级）。
+tts_engine = "piper"
+# Piper voice 模型目录；留空回落到 ~/.cache/teams-voice-interpreter/piper-models。
+# 模型从 https://huggingface.co/rhasspy/piper-voices 下载（默认两个音色：
+# en_US-amy-medium / zh_CN-huayan-medium，约 60 MB 各，共 ~120 MB）。
+piper_models_dir = ""
 uplink_virtual_device_name = "BlackHole 2ch"
 downlink_virtual_device_name = "TVI Downlink"
 allow_shared_virtual_device = false

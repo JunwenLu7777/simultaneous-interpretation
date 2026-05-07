@@ -123,3 +123,74 @@ def test_missing_deepseek_key_raises_two_part_error(monkeypatch: pytest.MonkeyPa
     assert exc_info.value.code == "config.deepseek_key_missing"
     assert exc_info.value.what_happened.startswith("发生了什么")
     assert exc_info.value.next_action.startswith("下一步如何做")
+
+
+def test_tts_engine_defaults_to_piper(tmp_path: Path) -> None:
+    """v1 默认 TTS 引擎为 piper（Edge-TTS 仅作降级保留）。"""
+    settings = load_settings(
+        config_path=tmp_path / "missing.toml",
+        env_file=tmp_path / "missing.env",
+        validate_credentials=False,
+    )
+
+    assert settings.tts_engine == "piper"
+
+
+def test_tts_engine_can_be_overridden_to_edge_tts(tmp_path: Path) -> None:
+    """config.toml 可显式切换回 edge_tts 作为降级路径。"""
+    config_path = tmp_path / "config.toml"
+    env_path = tmp_path / ".env"
+    config_path.write_text('tts_engine = "edge_tts"\n', encoding="utf-8")
+
+    settings = load_settings(config_path=config_path, env_file=env_path, validate_credentials=False)
+
+    assert settings.tts_engine == "edge_tts"
+
+
+def test_tts_engine_rejects_unknown_value(tmp_path: Path) -> None:
+    """未知 tts_engine 必须 fail-closed（pydantic Literal 校验）。"""
+    config_path = tmp_path / "config.toml"
+    env_path = tmp_path / ".env"
+    config_path.write_text('tts_engine = "espeak"\n', encoding="utf-8")
+
+    with pytest.raises(Exception):  # noqa: B017,PT011 - pydantic ValidationError 子类
+        load_settings(
+            config_path=config_path,
+            env_file=env_path,
+            validate_credentials=False,
+        )
+
+
+def test_piper_models_dir_falls_back_to_cache_dir_when_blank(tmp_path: Path) -> None:
+    """空配置回落到 ~/.cache/teams-voice-interpreter/piper-models。"""
+    settings = load_settings(
+        config_path=tmp_path / "missing.toml",
+        env_file=tmp_path / "missing.env",
+        validate_credentials=False,
+    )
+
+    expected = Path.home() / ".cache/teams-voice-interpreter/piper-models"
+    assert settings.resolved_piper_models_dir() == expected
+
+
+def test_piper_models_dir_can_be_overridden_with_tilde(tmp_path: Path) -> None:
+    """config.toml 显式指定 piper_models_dir（含 ~ 展开）必须生效。"""
+    config_path = tmp_path / "config.toml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        f'piper_models_dir = "{tmp_path / "custom-piper"}"\n',
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path=config_path, env_file=env_path, validate_credentials=False)
+
+    assert settings.resolved_piper_models_dir() == tmp_path / "custom-piper"
+
+
+def test_piper_models_dir_expands_tilde_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """piper_models_dir 配置中的 `~` 必须展开为用户主目录。"""
+    from teams_voice_interpreter.config import Settings
+
+    settings = Settings(piper_models_dir="~/custom-piper")
+
+    assert settings.resolved_piper_models_dir() == Path.home() / "custom-piper"
