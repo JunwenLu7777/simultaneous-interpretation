@@ -3,16 +3,16 @@
 **日期**：2026-05-05
 **Git commit**：当前 HEAD；本报告不内嵌自引用提交哈希，使用 `git log -1 --oneline` 核验
 **硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Piper 默认路径基准待发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已完成 BM-4 / BM-6 真实化、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 真实首字节 p50 566-598 ms 超原 400 ms 预算**；Edge-TTS 版 BM-6 曾测得 p50 789-815 ms / p95 941-1049 ms，导致端到端约 1702-1733 ms 并触发服务栈替换。随后 Piper 对比探针确认默认 TTS 可降至 p50 103-107 ms / p95 ≈ 197 ms，生产默认路径已改为 Piper，BM-6 子预算同步收紧为 p50 ≤ 200 ms / p95 ≤ 400 ms。C+α 测得整段 ASR ≤ 310 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**2026-05-07 宪章修订 PR (709ea05) 已合并**：SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms（硬）+ ≤ 1000 ms（软），p95 从 ≤ 1.5 s 调整为 ≤ 2000 ms；Piper 默认路径的子段估算为 ASR 297 ms + MT 566 ms + TTS 103 ms + ROUTE ~50 ms ≈ **1016 ms**，显示该服务栈有望进入硬阈值并接近软目标。**端到端门禁仍必须以 BM-10 / BM-10D 真机复跑为准**，当前不得把子段估算声明为 SC-001 / SC-002 已 Pass。详见「TTS 引擎对比与 Piper 决策」段。
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已完成 BM-4 / BM-6 真实化、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 复测 first token 最差方向 p50 518.6 ms / p95 825.9 ms，p50 与 p95 均超预算**；Edge-TTS 版 BM-6 曾测得 p50 789-815 ms / p95 941-1049 ms，导致端到端约 1702-1733 ms 并触发服务栈替换。随后 Piper 对比探针确认默认 TTS 可降至最差方向 p50 121.4 ms / p95 183.1 ms，生产默认路径已改为 Piper，BM-6 子预算同步收紧为 p50 ≤ 200 ms / p95 ≤ 400 ms。C+α 复测整段 ASR 约 280-417 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**2026-05-07 宪章修订 PR (709ea05) 已合并**：SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms（硬）+ ≤ 1000 ms（软），p95 从 ≤ 1.5 s 调整为 ≤ 2000 ms；Piper 默认路径的子段估算为上行 0.417s + 0.504s + 0.121s + ROUTE ~0.050s ≈ **1092 ms**、下行 0.322s + 0.519s + 0.107s + ROUTE ~0.050s ≈ **998 ms**，显示该服务栈有望进入硬阈值并贴近软目标。**端到端门禁仍必须以 BM-10 / BM-10D 真机复跑为准**，当前不得把子段估算声明为 SC-001 / SC-002 已 Pass。详见「Stage 5 无人值守复测」段。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
 | BM-1 | SC-010 / 宪章 IV | RAM 420 MB | ≤ 500 MB | Pass | 无 |
 | BM-2 | SC-005 | WER 优势 6% | ≥ 5% | Pass | 无 |
 | BM-3 | SC-010 / 宪章 IV | CPU 24% | ≤ 30% | Pass | 无 |
-| BM-4 | 宪章 IV | MT first token p50 598 ms / p95 753 ms（2026-05-07 真实化，上下行最差值；上行 p50 566 / 下行 p50 598） | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50)** | 重审 SC-001 阈值或换 MT 服务栈，详见「DeepSeek MT first token 真实化（BM-4）」 |
+| BM-4 | 宪章 IV | MT first token p50 518.6 ms / p95 825.9 ms（Stage 5 无人值守复测，上下行最差值；上行 p50 503.9 / 下行 p50 518.6） | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50, p95)** | 保持 MT 子预算风险，端到端是否可放行必须看 BM-10 / BM-10D |
 | BM-5 | SC-005 / FR-012 | 保真 96% / 术语延迟增量 120 ms | ≥ 95% / ≤ 200 ms | Pass | 无 |
-| BM-6 | SC-001 / SC-002 | Piper TTS first byte p50 107 ms / p95 197 ms（2026-05-07 真实化，上下行最差值；上行 p50 103 / 下行 p50 107） | p50 ≤ 200 ms / p95 ≤ 400 ms | Pass | 生产默认 TTS 已由 Edge-TTS 替换为 Piper；Edge-TTS 历史基线见后文 |
+| BM-6 | SC-001 / SC-002 | Piper TTS first byte p50 121.4 ms / p95 183.1 ms（Stage 5 无人值守复测，上下行最差值；上行 p50 121.4 / 下行 p50 107.1） | p50 ≤ 200 ms / p95 ≤ 400 ms | Pass | 生产默认 TTS 已由 Edge-TTS 替换为 Piper；Edge-TTS 历史基线见后文 |
 | BM-7 | Edge-TTS 稳定性 | 401/403 失败率 0.1% | < 0.5% | Pass | 无 |
 | BM-8 | AUDIO_ROUTE | BlackHole 路由 p95 18 ms | ≤ 50 ms | Pass | 无 |
 | BM-9 | SC-002 | Aggregate jitter p95 8 ms | ≤ 10 ms | Pass | 无 |
@@ -248,6 +248,29 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 9. ✅ 已更新 `perf-report.md` 主表 BM-6 行为 Piper 子预算与实测。
 
 **最近真测发现的子预算修订需求**：现有 BM-6 子预算（first byte p50 ≤ 400 ms / p95 ≤ 800 ms）按 Edge-TTS 量级设定，对 Piper 显著过宽（实测 p50 100 ms / p95 200 ms）。集成 PR 应一并把 BM-6 子预算调整为「first byte p50 ≤ 200 ms / p95 ≤ 400 ms」以反映 Piper 真实下限。
+
+## Stage 5 无人值守复测
+
+**日期**：2026-05-07  
+**目的**：不依赖真人讲话，使用 macOS `say` 合成音频与脚本探针复测 Piper 默认路径的 ASR / MT / TTS 子段。  
+**命令入口**：
+
+- `uv run --extra dev scripts/measure_asr_segment_latency.py --proof-json /tmp/tvi-asr-segment-stage5.json`
+- `uv run --extra dev scripts/measure_deepseek_first_token.py --samples-per-direction 15 --proof-json /tmp/tvi-deepseek-first-token-stage5.json`
+- `uv run --extra dev scripts/measure_piper_first_byte.py --samples-per-direction 15 --proof-json /tmp/tvi-piper-first-byte-stage5.json`
+
+| 子段 | 上行 | 下行 | 预算 | 结论 |
+|------|------|------|------|------|
+| ASR final（合成 WAV 整段） | 0.294 / 0.373 / 0.417 s（三档段长） | 0.282 / 0.280 / 0.322 s（三档段长） | FR-013 final ≤ 200 ms（VAD close 后）；本探针口径为整段 one-shot ASR，不直接等同 FR-013 | 子段仍为主要固定成本之一 |
+| MT first token | p50 503.9 ms / p95 773.1 ms | p50 518.6 ms / p95 825.9 ms | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50, 下行 p95)** |
+| Piper TTS first byte | p50 121.4 ms / p95 181.2 ms | p50 107.1 ms / p95 183.1 ms | p50 ≤ 200 ms / p95 ≤ 400 ms | Pass |
+
+**子段累加（非 BM-10 端到端门禁）**：
+
+- 上行保守估算：ASR 417 ms + MT 504 ms + Piper 121 ms + AUDIO_ROUTE 50 ms ≈ **1092 ms**。
+- 下行保守估算：ASR 322 ms + MT 519 ms + Piper 107 ms + AUDIO_ROUTE 50 ms ≈ **998 ms**。
+
+**边界**：该复测证明 Piper 默认路径的 TTS 子段稳定落在预算内，也证明 DeepSeek MT 子段仍有预算风险。它仍不是 BM-10 / BM-10D 真实端到端测量；发布门禁必须用真实 `listen` / `duplex` 路径复跑并记录首段写入时间。
 
 ## 冷启动与分发形态合规
 

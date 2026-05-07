@@ -450,7 +450,7 @@ class ReadinessChecker:
             return self._pass(
                 "live_pipeline",
                 "短句真实发声路径",
-                "已接入 DeepSeek HTTP、Edge-TTS live、afconvert 解码和 sounddevice 写出",
+                "已接入 DeepSeek HTTP、Piper/Edge-TTS TTS factory、PCM/MP3 解码和 sounddevice 写出",
             )
         if not self.require_live_pipeline or self.live_pipeline_enabled:
             return self._pass("live_pipeline", "真实同传管线", "已允许真实同传管线门禁通过")
@@ -462,7 +462,7 @@ class ReadinessChecker:
             "真实双向同传管线",
             (
                 "已接入 tvi duplex：默认麦克风上行、独立虚拟设备下行、DeepSeek HTTP、"
-                "Edge-TTS live、afconvert 解码和 sounddevice 写出"
+                "Piper/Edge-TTS TTS factory、PCM/MP3 解码和 sounddevice 写出"
             ),
         )
 
