@@ -172,6 +172,73 @@ def test_streaming_microphone_recorder_keeps_input_stream_open_while_yielding(mo
     assert chunks[0].shape == (8000,)
 
 
+def test_streaming_microphone_recorder_can_use_named_input_device(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """真机 smoke 可显式选择真实麦克风，避免误用 macOS 默认输入。"""
+    captured: dict[str, object] = {}
+
+    class FakeProbe:
+        def find_input_device_by_name(
+            self,
+            device_name: str,
+            *,
+            min_channels: int = 1,
+        ) -> AudioDevice:
+            captured["device_name"] = device_name
+            captured["min_channels"] = min_channels
+            return AudioDevice(
+                index=9,
+                name=device_name,
+                max_input_channels=1,
+                max_output_channels=0,
+            )
+
+    class FakeInputStream:
+        def __init__(
+            self,
+            *,
+            samplerate: int,
+            channels: int,
+            dtype: str,
+            device: int,
+            callback: object,
+        ) -> None:
+            del samplerate, channels, dtype
+            captured["device"] = device
+            self.callback = callback
+
+        def __enter__(self) -> "FakeInputStream":
+            self.callback(np.ones((8000, 1), dtype=np.int16), 8000, None, None)
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            pass
+
+    monkeypatch.setattr(
+        live_ptt.sd,
+        "query_devices",
+        lambda device_index: {"default_samplerate": 16000.0},
+    )
+    monkeypatch.setattr(live_ptt.sd, "InputStream", FakeInputStream)
+
+    chunks = list(
+        StreamingMicrophoneRecorder(
+            sample_rate_hz=16000,
+            device_probe=FakeProbe(),
+            device_name="Mac Studio Mic",
+        ).chunks(
+            chunk_seconds=0.5,
+            max_chunks=1,
+        )
+    )
+
+    assert captured == {
+        "device_name": "Mac Studio Mic",
+        "min_channels": 1,
+        "device": 9,
+    }
+    assert chunks[0].shape == (8000,)
+
+
 def test_streaming_blackhole_recorder_downmixes_stereo_input(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """下行监听必须从 BlackHole 2ch 读取并 downmix 为 16 kHz mono。"""
     captured: dict[str, object] = {}
@@ -430,6 +497,8 @@ def test_streaming_microphone_recorder_discards_too_short_speech(monkeypatch) ->
         "(noise)",
         "[Music]",
         "[INAUDIBLE]",
+        "(In Chinese)",
+        "Translation:",
         "12345",
         "[00:00:00]",
     ],
@@ -487,6 +556,9 @@ def test_transcript_text_from_segments_keeps_short_english_words() -> None:
         "关注我们获取更多",
         "请大家订阅",
         "請大家訂閱",
+        "请看视频!",
+        "请看视频",
+        "請看視頻!",
         "点击关注",
         "點擊關注",
         "点击订阅",

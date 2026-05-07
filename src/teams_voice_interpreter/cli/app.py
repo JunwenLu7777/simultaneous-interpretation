@@ -41,6 +41,7 @@ from teams_voice_interpreter.readiness import (
     ReadinessReport,
 )
 from teams_voice_interpreter.session.manager import DEFAULT_MANAGER
+from teams_voice_interpreter.session.transcript_ledger import TranscriptLedger
 from teams_voice_interpreter.stt.vad import (
     SileroBackend,
     VadBackendProtocol,
@@ -118,6 +119,11 @@ ONLINE_ASR_EARLY_PREPARE_CLI_OPTION = typer.Option(
     False,
     "--online-asr-early-prepare/--no-online-asr-early-prepare",
     help="更激进的实验：允许 online-asr stable partial 提前调用 MT/TTS；默认关闭。",
+)
+INPUT_DEVICE_NAME_CLI_OPTION = typer.Option(
+    "",
+    "--input-device-name",
+    help="真实麦克风设备名称；不传则使用 macOS 默认输入。可先运行 `tvi devices` 查看。",
 )
 REALTIME_PLAYBACK_QUEUE_SIZE = 0
 REALTIME_PLAYBACK_BACKLOG_WARNING_DEPTH = 3
@@ -286,6 +292,7 @@ def listen(
     online_asr: bool = ONLINE_ASR_CLI_OPTION,
     online_asr_early_prepare: bool = ONLINE_ASR_EARLY_PREPARE_CLI_OPTION,
     low_latency_proof: Path | None = LOW_LATENCY_PROOF_CLI_OPTION,
+    input_device_name: str = INPUT_DEVICE_NAME_CLI_OPTION,
     target: str = typer.Option(
         "blackhole",
         "--target",
@@ -303,17 +310,21 @@ def listen(
             expected_direction=direction,
             expected_language=_source_language_for_direction(direction),
         )
+        input_device = _microphone_input_device(input_device_name=input_device_name)
         typer.echo("正在加载 Whisper 模型；加载完成后会开始连续监听。")
+        typer.echo(f"真实输入设备：{input_device.name}")
         bridge = _live_bridge_for_direction(direction)
         warm_up_pyav_decoder()
         _warn_online_asr_early_prepare_if_disabled(
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
         )
+        ledger = TranscriptLedger.create_default()
+        typer.echo(f"Transcript ledger：{ledger.path}")
         typer.echo("开始连续监听；按 Ctrl+C 停止。")
         _run_listen_pipeline(
             label="",
-            recorder=StreamingMicrophoneRecorder(),
+            recorder=StreamingMicrophoneRecorder(device_name=input_device_name),
             bridge=bridge,
             direction=direction,
             target=target,
@@ -326,6 +337,7 @@ def listen(
             show_latency=show_latency,
             online_asr=online_asr,
             online_asr_early_prepare=online_asr_early_prepare,
+            ledger=ledger,
         )
     except KeyboardInterrupt:
         typer.echo("已停止连续监听。")
@@ -347,6 +359,7 @@ def duplex(
     online_asr_early_prepare: bool = ONLINE_ASR_EARLY_PREPARE_CLI_OPTION,
     uplink_low_latency_proof: Path | None = UPLINK_LOW_LATENCY_PROOF_CLI_OPTION,
     downlink_low_latency_proof: Path | None = DOWNLINK_LOW_LATENCY_PROOF_CLI_OPTION,
+    input_device_name: str = INPUT_DEVICE_NAME_CLI_OPTION,
     allow_shared_virtual_device: bool = typer.Option(
         False,
         "--allow-shared-virtual-device",
@@ -372,14 +385,20 @@ def duplex(
             proof_label="下行",
         )
         route = _duplex_route(allow_shared_virtual_device=allow_shared_virtual_device)
+        input_device = _microphone_input_device(input_device_name=input_device_name)
+        output_device = _default_output_device()
     except UserFacingError as error:
         typer.echo(str(error))
         raise typer.Exit(1) from error
     errors: queue.Queue[BaseException] = queue.Queue()
     playback_gate: _PlaybackGate | None = _PlaybackGate() if route.shared_virtual_device else None
     typer.echo("正在加载两路 Whisper 模型；加载完成后会开始双向监听。")
+    typer.echo(f"上行真实输入设备：{input_device.name}")
     typer.echo(f"上行输出设备：{route.uplink_device.name}")
     typer.echo(f"下行输入设备：{route.downlink_device.name}")
+    typer.echo(f"下行真实输出设备：{output_device.name}")
+    ledger = TranscriptLedger.create_default()
+    typer.echo(f"Transcript ledger：{ledger.path}")
     if route.shared_virtual_device:
         typer.echo(
             "提示：当前显式允许共享虚拟设备，只适合临时测试；正式会议请改成两路独立虚拟设备。"
@@ -394,7 +413,7 @@ def duplex(
             target=_duplex_pipeline_runner,
             kwargs={
                 "label": "上行",
-                "recorder": StreamingMicrophoneRecorder(),
+                "recorder": StreamingMicrophoneRecorder(device_name=input_device_name),
                 "bridge": _live_bridge_for_direction(AudioDirection.UPLINK),
                 "direction": AudioDirection.UPLINK,
                 "target": "blackhole",
@@ -410,6 +429,7 @@ def duplex(
                 "errors": errors,
                 "playback_gate": playback_gate,
                 "suppress_downlink_on_playback": True,
+                "ledger": ledger,
             },
             daemon=True,
         ),
@@ -433,6 +453,7 @@ def duplex(
                 "errors": errors,
                 "playback_gate": playback_gate,
                 "suppress_downlink_on_playback": False,
+                "ledger": ledger,
             },
             daemon=True,
         ),
@@ -932,6 +953,7 @@ def _run_listen_pipeline(
     online_asr_early_prepare: bool = False,
     playback_gate: _PlaybackGate | None = None,
     suppress_downlink_on_playback: bool = False,
+    ledger: TranscriptLedger | None = None,
 ) -> None:
     if online_asr:
         _run_online_listen_pipeline(
@@ -950,6 +972,7 @@ def _run_listen_pipeline(
             online_asr_early_prepare=online_asr_early_prepare,
             playback_gate=playback_gate,
             suppress_downlink_on_playback=suppress_downlink_on_playback,
+            ledger=ledger,
         )
         return
     segment_queue: queue.Queue[tuple[int, SpeechSegment] | None] = queue.Queue(maxsize=3)
@@ -973,6 +996,7 @@ def _run_listen_pipeline(
             burst_tracker,
             transcript_deduplicator,
             async_runner,
+            ledger,
         ),
         daemon=True,
     )
@@ -1075,6 +1099,7 @@ def _run_online_listen_pipeline(
     online_asr_early_prepare: bool,
     playback_gate: _PlaybackGate | None = None,
     suppress_downlink_on_playback: bool = False,
+    ledger: TranscriptLedger | None = None,
 ) -> None:
     """实验性在线 ASR 管线：帧级喂 ASR partial，VAD 收段时 final 收口。"""
     playback_queue: queue.Queue[_PendingPlayback | None] = queue.Queue(
@@ -1161,6 +1186,7 @@ def _run_online_listen_pipeline(
                 async_runner=async_runner,
                 burst_tracker=burst_tracker,
                 transcript_deduplicator=transcript_deduplicator,
+                ledger=ledger,
             )
             previous_closed_by_max_length = close_reason == "max_length"
             boundary_silence_frames = 0
@@ -1200,6 +1226,7 @@ def _run_online_listen_pipeline(
                     async_runner=async_runner,
                     burst_tracker=burst_tracker,
                     transcript_deduplicator=transcript_deduplicator,
+                    ledger=ledger,
                 )
     finally:
         playback_queue.put(None)
@@ -1227,6 +1254,7 @@ def _duplex_pipeline_runner(
     errors: queue.Queue[BaseException],
     playback_gate: _PlaybackGate,
     suppress_downlink_on_playback: bool,
+    ledger: TranscriptLedger | None,
 ) -> None:
     try:
         _run_listen_pipeline(
@@ -1246,6 +1274,7 @@ def _duplex_pipeline_runner(
             online_asr_early_prepare=online_asr_early_prepare,
             playback_gate=playback_gate,
             suppress_downlink_on_playback=suppress_downlink_on_playback,
+            ledger=ledger,
         )
     except BaseException as error:
         errors.put(error)
@@ -1263,6 +1292,7 @@ def _listen_worker(
     burst_tracker: _BurstTracker | None = None,
     transcript_deduplicator: _TranscriptOverlapDeduplicator | None = None,
     async_runner: _AsyncLoopRunner | None = None,
+    ledger: TranscriptLedger | None = None,
 ) -> None:
     """后台处理 ASR / 翻译 / 合成，避免阻塞继续采集。"""
     runner = async_runner or _AsyncLoopRunner()
@@ -1290,6 +1320,7 @@ def _listen_worker(
                     burst_tracker=tracker,
                     transcript_deduplicator=deduplicator,
                     async_runner=runner,
+                    ledger=ledger,
                 )
             finally:
                 segment_queue.task_done()
@@ -1311,6 +1342,8 @@ class _PendingPlayback:
     queue_depth_at_enqueue: int
     dropped_pending_before_enqueue: int
     show_latency: bool
+    ledger: TranscriptLedger | None = None
+    ledger_record_id: str = ""
     final_transcribed_at: float | None = None
     burst_id: int = 0
 
@@ -1544,6 +1577,7 @@ def _prepare_online_final_segment(
     async_runner: _AsyncLoopRunner,
     burst_tracker: _BurstTracker,
     transcript_deduplicator: _TranscriptOverlapDeduplicator,
+    ledger: TranscriptLedger | None = None,
 ) -> None:
     started = segment_started_at or time.perf_counter()
     display_index = _display_index(label, index)
@@ -1599,6 +1633,8 @@ def _prepare_online_final_segment(
                 show_latency=show_latency,
                 burst_id=burst_id,
                 final_transcribed_at=transcribed_at,
+                direction=direction,
+                ledger=ledger,
             )
         return
     early_preparer.cancel_pending()
@@ -1620,7 +1656,7 @@ def _prepare_online_final_segment(
         typer.echo(f"{display_index} {error}")
         return
     prepared_at = time.perf_counter()
-    typer.echo(f"{display_index} 译文：{prepared.target_text}")
+    typer.echo(f"{display_index} 首片译文：{prepared.target_text}")
     _enqueue_prepared_playback(
         playback_queue,
         index=index,
@@ -1632,6 +1668,8 @@ def _prepare_online_final_segment(
         show_latency=show_latency,
         burst_id=burst_id,
         final_transcribed_at=transcribed_at,
+        direction=direction,
+        ledger=ledger,
     )
 
 
@@ -1843,6 +1881,7 @@ def _prepare_listen_segment(
     async_runner: _AsyncLoopRunner | None = None,
     burst_tracker: _BurstTracker | None = None,
     transcript_deduplicator: _TranscriptOverlapDeduplicator | None = None,
+    ledger: TranscriptLedger | None = None,
 ) -> None:
     started = time.perf_counter()
     display_index = _display_index(label, index)
@@ -1913,6 +1952,8 @@ def _prepare_listen_segment(
                     show_latency=show_latency,
                     burst_id=burst_id,
                     final_transcribed_at=transcribed_at,
+                    direction=direction,
+                    ledger=ledger,
                 )
             return
         if early_preparer is not None:
@@ -1935,7 +1976,7 @@ def _prepare_listen_segment(
             typer.echo(f"{display_index} {error}")
             return
         prepared_at = time.perf_counter()
-        typer.echo(f"{display_index} 译文：{prepared.target_text}")
+        typer.echo(f"{display_index} 首片译文：{prepared.target_text}")
         _enqueue_prepared_playback(
             playback_queue,
             index=index,
@@ -1947,6 +1988,8 @@ def _prepare_listen_segment(
             show_latency=show_latency,
             burst_id=burst_id,
             final_transcribed_at=transcribed_at,
+            direction=direction,
+            ledger=ledger,
         )
     finally:
         if owns_runner:
@@ -2040,6 +2083,8 @@ def _enqueue_prepared_playback(
     prepared_at: float,
     show_latency: bool,
     burst_id: int,
+    direction: AudioDirection,
+    ledger: TranscriptLedger | None = None,
     final_transcribed_at: float | None = None,
 ) -> None:
     display_index = _display_index(label, index)
@@ -2059,6 +2104,17 @@ def _enqueue_prepared_playback(
             f"{display_index} 实时播放积压 {queue_depth_at_enqueue} 段：内容会保留，"
             "但端到端延迟正在升高。"
         )
+    ledger_record_id = ""
+    if ledger is not None:
+        ledger_record_id = ledger.record_prepared(
+            label=label,
+            index=index,
+            burst_id=burst_id,
+            direction=direction,
+            source_text=prepared.source_text,
+            target_text=_ledger_target_text(prepared),
+            preview_only=prepared.pcm_iterator is not None,
+        )
     playback_queue.put(
         _PendingPlayback(
             index=index,
@@ -2070,6 +2126,8 @@ def _enqueue_prepared_playback(
             queue_depth_at_enqueue=queue_depth_at_enqueue,
             dropped_pending_before_enqueue=dropped_pending,
             show_latency=show_latency,
+            ledger=ledger,
+            ledger_record_id=ledger_record_id,
             final_transcribed_at=final_transcribed_at,
             burst_id=burst_id,
         )
@@ -2098,6 +2156,11 @@ def _drop_pending_playbacks(
             break
         playback_queue.task_done()
         if item.burst_id < current_burst_id:
+            if item.ledger is not None and item.ledger_record_id:
+                item.ledger.record_drop(
+                    record_id=item.ledger_record_id,
+                    reason="cross_burst_backlog",
+                )
             dropped += 1
         else:
             kept.append(item)
@@ -2106,6 +2169,18 @@ def _drop_pending_playbacks(
     if sentinel_seen:
         playback_queue.put(None)
     return dropped
+
+
+def _ledger_target_text(prepared: PreparedSayResult) -> str:
+    """尽量取 streaming producer 已确认的完整译文，回退到首片译文。"""
+    iterator = prepared.pcm_iterator
+    if iterator is not None:
+        snapshot = getattr(iterator, "target_text_snapshot", None)
+        if callable(snapshot):
+            text = str(snapshot()).strip()
+            if text:
+                return text
+    return prepared.target_text
 
 
 def _listen_playback_worker(
@@ -2131,6 +2206,14 @@ def _listen_playback_worker(
                 stale_wait_s=stale_wait_s,
                 stale_window_s=stale_window_s,
             ):
+                if item.ledger is not None and item.ledger_record_id:
+                    item.ledger.record_playback(
+                        record_id=item.ledger_record_id,
+                        status="skipped_stale",
+                        target_text=_ledger_target_text(item.prepared),
+                        reason="stale_playback_window",
+                        wait_seconds=stale_wait_s,
+                    )
                 typer.echo(
                     f"{_display_index(item.label, item.index)} 已丢弃：译音等待播放 "
                     f"{stale_wait_s:.2f}s，超过实时窗口 "
@@ -2159,6 +2242,13 @@ def _listen_playback_worker(
                 )
                 playback_succeeded = True
             except UserFacingError as error:
+                if item.ledger is not None and item.ledger_record_id:
+                    item.ledger.record_playback(
+                        record_id=item.ledger_record_id,
+                        status="failed",
+                        target_text=_ledger_target_text(item.prepared),
+                        reason=error.code,
+                    )
                 typer.echo(f"{_display_index(item.label, item.index)} {error}")
                 continue
             finally:
@@ -2176,6 +2266,13 @@ def _listen_playback_worker(
                 playback_started=playback_started,
                 completed_at=completed_at,
             )
+            if item.ledger is not None and item.ledger_record_id:
+                status = "truncated" if result.playback_truncated else "played"
+                item.ledger.record_playback(
+                    record_id=item.ledger_record_id,
+                    status=status,
+                    target_text=_ledger_target_text(item.prepared),
+                )
             last_played_burst_id = item.burst_id
         finally:
             playback_queue.task_done()
@@ -2314,6 +2411,19 @@ def _safe_default_device(lookup: Callable[[], AudioDevice]) -> AudioDevice | Non
         return lookup()
     except UserFacingError:
         return None
+
+
+def _microphone_input_device(*, input_device_name: str) -> AudioDevice:
+    """解析 tvi 实际监听的真实麦克风，供启动日志与录音器保持一致。"""
+    probe = AudioDeviceProbe()
+    if input_device_name:
+        return probe.find_input_device_by_name(input_device_name)
+    return probe.get_default_input()
+
+
+def _default_output_device() -> AudioDevice:
+    """解析 tvi 下行译音实际播放到的 macOS 默认输出。"""
+    return AudioDeviceProbe().get_default_output()
 
 
 def _print_audio_devices(

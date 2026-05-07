@@ -352,6 +352,62 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
     assert prepared.target_text == "Hello"
 
 
+def test_prepare_streaming_exposes_full_target_text_snapshot(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """ledger 需要在播放结束后拿到完整译文，而不是只记录首片 delta。"""
+
+    class _FakeDeepSeek:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def stream_translate(
+            self, text: str, *, direction: AudioDirection, context_text: str = ""
+        ) -> AsyncIterator[TranslationChunk]:
+            del text, direction, context_text
+            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="delta", text=" world")
+            yield TranslationChunk(kind="completed", text="")
+
+    class _FakeSettings:
+        deepseek_model = "deepseek-chat"
+        tts_rate = "+0%"
+        tts_engine = "edge_tts"
+
+        def resolved_deepseek_api_key(self) -> str:
+            return "sk-test"
+
+    async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
+        del kwargs
+        yield np.array([1], dtype=np.int16)
+
+    async def _drain(iterator: AsyncIterator[np.ndarray]) -> None:
+        async for _ in iterator:
+            pass
+
+    monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
+    monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
+    monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _fake_pcm)
+    monkeypatch.setattr(live_say, "prewarm_tts_client", lambda settings, *, direction: None)
+    monkeypatch.setattr(
+        LiveSayBridge,
+        "_target_device",
+        lambda self, target: AudioDevice(1, "AirPods", 0, 2),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    prepared = asyncio.run(
+        bridge.prepare(
+            "你好",
+            direction=AudioDirection.UPLINK,
+            target="default",
+            streaming=True,
+        )
+    )
+    asyncio.run(_drain(prepared.pcm_iterator))
+
+    assert prepared.target_text == "Hello"
+    assert prepared.pcm_iterator.target_text_snapshot() == "Hello world"
+
+
 def test_prepare_streaming_cancels_first_tts_when_mt_fails_after_delta(  # type: ignore[no-untyped-def]
     monkeypatch,
 ) -> None:

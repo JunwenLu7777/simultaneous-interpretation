@@ -3,6 +3,7 @@
 import json
 
 import numpy as np
+import pytest
 from typer.testing import CliRunner
 
 from teams_voice_interpreter.audio.routing import AudioDevice
@@ -13,6 +14,47 @@ from teams_voice_interpreter.live_say import PreparedSayResult, SayResult
 from teams_voice_interpreter.stt.whisper_streaming import OnlineASRProcessor, WhisperStreamingConfig
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _fake_cli_runtime(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """命令测试不依赖宿主机真实 CoreAudio 设备。"""
+    monkeypatch.setattr(
+        cli_app,
+        "_microphone_input_device",
+        lambda *, input_device_name: AudioDevice(
+            index=8,
+            name=input_device_name or "MacBook Pro Microphone",
+            max_input_channels=1,
+            max_output_channels=0,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_app,
+        "_default_output_device",
+        lambda: AudioDevice(
+            index=9,
+            name="AirPods Pro",
+            max_input_channels=0,
+            max_output_channels=2,
+        ),
+    )
+
+    created_ledgers: list[cli_app.TranscriptLedger] = []
+
+    def fake_create_ledger() -> cli_app.TranscriptLedger:
+        ledger = cli_app.TranscriptLedger(
+            path=tmp_path / f"ledger-{len(created_ledgers)}.jsonl",
+            session_id=f"test-{len(created_ledgers)}",
+        )
+        created_ledgers.append(ledger)
+        return ledger
+
+    monkeypatch.setattr(
+        cli_app.TranscriptLedger,
+        "create_default",
+        staticmethod(fake_create_ledger),
+    )
 
 
 def _rms_only_speech_decider(frame: np.ndarray, *, vad: object, rms_threshold: float) -> bool:
@@ -329,9 +371,10 @@ def test_duplex_prints_route_errors_before_exit(monkeypatch) -> None:  # type: i
     assert result.exception is not None
 
 
-def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_listen_command_processes_continuous_chunks(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     """listen 命令应持续采集分片，不依赖每句说完后手动停顿。"""
     captured: dict[str, object] = {}
+    ledger = cli_app.TranscriptLedger(path=tmp_path / "listen-ledger.jsonl", session_id="test")
 
     class FakeStreamRecorder:
         def segments(
@@ -404,7 +447,16 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
         say_bridge = FakeSayBridge()
 
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    def fake_stream_recorder(**kwargs: object) -> FakeStreamRecorder:
+        captured["recorder_kwargs"] = kwargs
+        return FakeStreamRecorder()
+
+    monkeypatch.setattr(
+        cli_app.TranscriptLedger,
+        "create_default",
+        staticmethod(lambda: ledger),
+    )
+    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", fake_stream_recorder)
 
     result = runner.invoke(
         cli_app.app,
@@ -427,6 +479,8 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
             "default",
             "--direction",
             "uplink",
+            "--input-device-name",
+            "Mac Studio Mic",
         ],
     )
 
@@ -438,8 +492,20 @@ def test_listen_command_processes_continuous_chunks(monkeypatch) -> None:  # typ
     assert captured["rms_threshold"] == 180.0
     assert captured["max_segments"] == 1
     assert captured["direction"] is AudioDirection.UPLINK
+    assert captured["recorder_kwargs"] == {"device_name": "Mac Studio Mic"}
+    assert "真实输入设备：Mac Studio Mic" in result.output
+    assert f"Transcript ledger：{ledger.path}" in result.output
     assert "你好吗，我今年三十岁，你爱我吗" in result.output
     assert "How are you? I am 30. Do you love me?" in result.output
+    ledger_events = [
+        json.loads(line) for line in ledger.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event"] for event in ledger_events] == ["prepared", "playback"]
+    assert ledger_events[0]["source_text"] == "你好吗，我今年三十岁，你爱我吗"
+    assert ledger_events[0]["target_text"] == "How are you? I am 30. Do you love me?"
+    assert ledger_events[0]["target_text_preview_only"] is False
+    assert ledger_events[1]["status"] == "played"
+    assert ledger_events[1]["target_text"] == "How are you? I am 30. Do you love me?"
 
 
 def test_listen_command_online_asr_prepares_stable_partial(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -511,7 +577,11 @@ def test_listen_command_online_asr_prepares_stable_partial(monkeypatch, tmp_path
         say_bridge = FakeSayBridge()
 
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(
+        cli_app,
+        "StreamingMicrophoneRecorder",
+        lambda **kwargs: FakeStreamRecorder(),
+    )
     monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
     proof_path = _write_valid_low_latency_proof(tmp_path)
 
@@ -612,7 +682,11 @@ def test_listen_command_online_asr_does_not_prepare_partials_by_default(monkeypa
         say_bridge = FakeSayBridge()
 
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(
+        cli_app,
+        "StreamingMicrophoneRecorder",
+        lambda **kwargs: FakeStreamRecorder(),
+    )
     monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
 
     result = runner.invoke(
@@ -715,7 +789,11 @@ def test_listen_command_online_asr_reuses_stable_suffix_after_forced_split(
         say_bridge = FakeSayBridge()
 
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(
+        cli_app,
+        "StreamingMicrophoneRecorder",
+        lambda **kwargs: FakeStreamRecorder(),
+    )
     monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
     monkeypatch.setattr(
         cli_app,
@@ -819,7 +897,11 @@ def test_listen_command_online_asr_flushes_tail_when_stream_ends(monkeypatch) ->
         say_bridge = FakeSayBridge()
 
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", lambda **kwargs: FakeBridge())
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(
+        cli_app,
+        "StreamingMicrophoneRecorder",
+        lambda **kwargs: FakeStreamRecorder(),
+    )
     monkeypatch.setattr(cli_app, "_is_speech_frame", _rms_only_speech_decider)
 
     result = runner.invoke(
@@ -842,7 +924,7 @@ def test_listen_command_online_asr_flushes_tail_when_stream_ends(monkeypatch) ->
     assert result.exit_code == 0
     assert prepared_sources == ["客户续费风险缓冲"]
     assert "在线识别：客户续费风险缓冲" in result.output
-    assert "译文：译:客户续费风险缓冲" in result.output
+    assert "首片译文：译:客户续费风险缓冲" in result.output
 
 
 def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -934,6 +1016,12 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
             self.transcriber = FakeTranscriber(source_language)
             self.say_bridge = FakeSayBridge()
 
+    recorder_kwargs: list[dict[str, object]] = []
+
+    def fake_microphone_recorder(**kwargs: object) -> FakeStreamRecorder:
+        recorder_kwargs.append(kwargs)
+        return FakeStreamRecorder()
+
     monkeypatch.setattr(cli_app, "_PlaybackGate", FakeGate)
     monkeypatch.setattr(
         cli_app,
@@ -945,18 +1033,37 @@ def test_duplex_command_runs_uplink_and_downlink_pipelines(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(cli_app, "LivePushToTalkBridge", FakeBridge)
-    monkeypatch.setattr(cli_app, "StreamingMicrophoneRecorder", lambda: FakeStreamRecorder())
+    monkeypatch.setattr(
+        cli_app,
+        "StreamingMicrophoneRecorder",
+        fake_microphone_recorder,
+    )
     monkeypatch.setattr(
         cli_app,
         "StreamingBlackHoleRecorder",
         lambda **kwargs: FakeStreamRecorder(),
     )
 
-    result = runner.invoke(cli_app.app, ["duplex", "--chunks", "1", "--hide-latency"])
+    result = runner.invoke(
+        cli_app.app,
+        [
+            "duplex",
+            "--chunks",
+            "1",
+            "--hide-latency",
+            "--input-device-name",
+            "Mac Studio Mic",
+        ],
+    )
 
     assert result.exit_code == 0
+    assert recorder_kwargs == [{"device_name": "Mac Studio Mic"}]
     assert sorted(languages) == ["en", "zh"]
     assert ("你好", AudioDirection.UPLINK, "blackhole") in prepared
     assert ("hello", AudioDirection.DOWNLINK, "default") in prepared
-    assert "[上行 1] 译文：Hello" in result.output
-    assert "[下行 1] 译文：你好" in result.output
+    assert "上行真实输入设备：Mac Studio Mic" in result.output
+    assert "上行输出设备：TVI Uplink" in result.output
+    assert "下行输入设备：TVI Downlink" in result.output
+    assert "下行真实输出设备：AirPods Pro" in result.output
+    assert "[上行 1] 首片译文：Hello" in result.output
+    assert "[下行 1] 首片译文：你好" in result.output

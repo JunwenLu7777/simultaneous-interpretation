@@ -481,6 +481,8 @@ class _EarlyTranslationPCMStream:
         max_queue_chunks: int = 16,
     ) -> None:
         self._closed = threading.Event()
+        self._target_text_parts: list[str] = []
+        self._target_text_lock = threading.Lock()
         self._pcm_queue: queue.Queue[Int16Array | BaseException | None] = queue.Queue(
             maxsize=max_queue_chunks
         )
@@ -543,8 +545,14 @@ class _EarlyTranslationPCMStream:
             asyncio.CancelledError,
             concurrent.futures.CancelledError,
             concurrent.futures.TimeoutError,
+            RuntimeError,
         ):
             await asyncio.to_thread(self._future.result, 0.2)
+
+    def target_text_snapshot(self) -> str:
+        """返回 producer 已确认要合成的译文文本，供 ledger 补完整译文。"""
+        with self._target_text_lock:
+            return _join_target_text_parts(self._target_text_parts)
 
     async def _produce(
         self,
@@ -634,18 +642,29 @@ class _EarlyTranslationPCMStream:
                 first_tts_task=first_tts_task,
                 prewarm_task=prewarm_task,
             )
+        except asyncio.CancelledError:
+            await self._cancel_background_tasks(first_tts_task, prewarm_task)
+            raise
         except Exception as error:
-            if first_tts_task is not None:
-                first_tts_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await first_tts_task
-            prewarm_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await prewarm_task
+            await self._cancel_background_tasks(first_tts_task, prewarm_task)
             self._put_ready_once(error)
             self._put_pcm(error)
         finally:
             self._put_pcm(None)
+
+    async def _cancel_background_tasks(
+        self,
+        first_tts_task: asyncio.Task[None] | None,
+        prewarm_task: asyncio.Task[None],
+    ) -> None:
+        """取消 producer 派生任务，避免 async generator 关闭竞态泄漏。"""
+        if first_tts_task is not None:
+            first_tts_task.cancel()
+            with suppress(asyncio.CancelledError, RuntimeError, Exception):
+                await first_tts_task
+        prewarm_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await prewarm_task
 
     async def _finish_pending_translation(
         self,
@@ -701,6 +720,8 @@ class _EarlyTranslationPCMStream:
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
     ) -> None:
+        with self._target_text_lock:
+            self._target_text_parts.append(text)
         async for pcm in stream_pcm_chunks_with_retry(
             target_text=text,
             direction=direction,
@@ -747,6 +768,19 @@ def _target_text_from_chunks(chunks: list[TranslationChunk]) -> str:
 def _join_text_delta(existing: str, delta: str) -> str:
     """按 SSE 原样拼接 MT delta；空格由模型 chunk 自身携带。"""
     return existing + delta
+
+
+def _join_target_text_parts(parts: list[str]) -> str:
+    """把已提交给 TTS 的多片译文拼回 ledger 文本。"""
+    text = ""
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        if text and text[-1].isalnum() and stripped[0].isalnum():
+            text += " "
+        text += stripped
+    return text
 
 
 def _is_early_tts_text_ready(text: str) -> bool:

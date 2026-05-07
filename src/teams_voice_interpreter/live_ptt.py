@@ -45,6 +45,10 @@ HALLUCINATION_MARKERS = frozenset(
         "*BEEP*",
         "*MUSIC*",
         "*NOISE*",
+        "IN CHINESE",
+        "IN ENGLISH",
+        "TRANSLATION",
+        "TRANSLATION:",
         "音声",
         "声音声",
         "音聲",
@@ -68,6 +72,8 @@ HALLUCINATION_PREFIX_PATTERNS: frozenset[str] = frozenset(
         "請大家點讚",
         "请大家订阅",
         "請大家訂閱",
+        "请看视频",
+        "請看視頻",
         "如果您喜欢",
         "如果你喜欢",
         "记得点赞",
@@ -356,6 +362,8 @@ class StreamingAudioRecorder:
             if self.input_device_name:
                 return probe.find_input_device_by_name(self.input_device_name, min_channels=2)
             return probe.find_blackhole_2ch()
+        if self.input_device_name:
+            return probe.find_input_device_by_name(self.input_device_name)
         return probe.get_default_input()
 
     def _input_channels(self, device: AudioDevice) -> int:
@@ -371,18 +379,20 @@ class StreamingAudioRecorder:
 
 
 class StreamingMicrophoneRecorder(StreamingAudioRecorder):
-    """后台持续采集默认麦克风。"""
+    """后台持续采集默认或显式指定的真实麦克风。"""
 
     def __init__(
         self,
         *,
         sample_rate_hz: int = 16000,
         device_probe: AudioDeviceProbe | None = None,
+        device_name: str = "",
     ) -> None:
         super().__init__(
             sample_rate_hz=sample_rate_hz,
             device_probe=device_probe,
             input_source="default_input",
+            input_device_name=device_name,
         )
 
 
