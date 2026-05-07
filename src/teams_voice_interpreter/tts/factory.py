@@ -11,11 +11,16 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from teams_voice_interpreter.config import Settings
+from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient
 from teams_voice_interpreter.tts.piper_client import PiperClient
+
+_PIPER_CLIENTS: dict[str, PiperClient] = {}
+_PIPER_CLIENTS_LOCK = threading.Lock()
 
 
 def build_tts_client(settings: Settings) -> Any:
@@ -33,5 +38,29 @@ def build_tts_client(settings: Settings) -> Any:
         TTS 客户端实例（PiperClient 或 EdgeTTSClient）。
     """
     if settings.tts_engine == "piper":
-        return PiperClient(models_dir=settings.resolved_piper_models_dir())
+        return _cached_piper_client(settings)
     return EdgeTTSClient(live=True, rate=settings.tts_rate)
+
+
+def prewarm_tts_client(settings: Settings, *, direction: AudioDirection) -> None:
+    """预热当前方向的 TTS backend；非 Piper backend 无需预热。"""
+    if settings.tts_engine != "piper":
+        return
+    _cached_piper_client(settings).preload_voice(direction=direction)
+
+
+def clear_tts_client_cache() -> None:
+    """测试辅助：清空进程级 Piper client cache。"""
+    with _PIPER_CLIENTS_LOCK:
+        _PIPER_CLIENTS.clear()
+
+
+def _cached_piper_client(settings: Settings) -> PiperClient:
+    models_dir = settings.resolved_piper_models_dir()
+    cache_key = str(models_dir)
+    with _PIPER_CLIENTS_LOCK:
+        client = _PIPER_CLIENTS.get(cache_key)
+        if client is None:
+            client = PiperClient(models_dir=models_dir)
+            _PIPER_CLIENTS[cache_key] = client
+        return client

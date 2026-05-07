@@ -16,17 +16,15 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import PiperTTSError
 from teams_voice_interpreter.tts.edge_tts_client import TTSEvent
-
-if TYPE_CHECKING:
-    from piper import PiperVoice
 
 # 与 `scripts/measure_piper_first_byte.py` 一致的默认音色映射；阶段 3 集成时
 # 由 `config.py` 的 `piper_voices` 配置覆盖。
@@ -75,6 +73,7 @@ class PiperClient:
         self._voices: dict[AudioDirection, str] = voices or dict(DEFAULT_PIPER_VOICES)
         self._voice_loader: Any | None = voice_loader
         self._loaded: dict[str, Any] = {}
+        self._load_lock = threading.Lock()
 
     def validate_voice(self, voice: str) -> None:
         """校验 voice 模型文件存在。
@@ -95,6 +94,12 @@ class PiperClient:
                     f"{voice}.onnx 与 {voice}.onnx.json 到 {self._models_dir}/。"
                 ),
             )
+
+    def preload_voice(self, *, direction: AudioDirection, voice: str | None = None) -> None:
+        """提前加载指定方向的 voice，降低首个 TTS chunk 的 cold start 抖动。"""
+        selected_voice = voice or self._voices[direction]
+        self.validate_voice(selected_voice)
+        self._get_or_load(selected_voice)
 
     async def stream_synthesize(
         self,
@@ -165,8 +170,9 @@ class PiperClient:
         yield TTSEvent(kind="completed", audio_format=PIPER_AUDIO_FORMAT)
 
     def _get_or_load(self, voice: str) -> Any:
-        if voice not in self._loaded:
-            self._loaded[voice] = self._load_voice(voice)
+        with self._load_lock:
+            if voice not in self._loaded:
+                self._loaded[voice] = self._load_voice(voice)
         return self._loaded[voice]
 
     def _load_voice(self, voice: str) -> Any:

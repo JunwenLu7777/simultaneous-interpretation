@@ -235,6 +235,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
 ) -> None:
     """实时 streaming 路径必须把 TTS retry 参数传给 early PCM producer。"""
     captured: dict[str, object] = {}
+    prewarmed_directions: list[AudioDirection] = []
 
     class _FakeDeepSeek:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -250,6 +251,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
     class _FakeSettings:
         deepseek_model = "deepseek-chat"
         tts_rate = "+0%"
+        tts_engine = "edge_tts"
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
@@ -264,6 +266,11 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
     monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _FakeDeepSeek)
     monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
     monkeypatch.setattr(live_say, "stream_pcm_chunks_with_retry", _spy)
+    monkeypatch.setattr(
+        live_say,
+        "prewarm_tts_client",
+        lambda settings, *, direction: prewarmed_directions.append(direction),
+    )
     monkeypatch.setattr(
         LiveSayBridge,
         "_target_device",
@@ -284,6 +291,7 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
     assert captured["max_retries"] == 1
     assert captured["target_text"] == "Hello"
     assert pcm.tolist() == [1, 2]
+    assert prewarmed_directions == [AudioDirection.UPLINK]
 
 
 def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # type: ignore[no-untyped-def]
@@ -307,6 +315,7 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
     class _FakeSettings:
         deepseek_model = "deepseek-chat"
         tts_rate = "+0%"
+        tts_engine = "edge_tts"
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
@@ -364,6 +373,7 @@ def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: 
     class _FakeSettings:
         deepseek_model = "deepseek-chat"
         tts_rate = "+0%"
+        tts_engine = "edge_tts"
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
@@ -411,6 +421,7 @@ def test_prepare_reuses_single_httpx_client_across_nonstreaming_calls(monkeypatc
     class _FakeSettings:
         deepseek_model = "deepseek-chat"
         tts_rate = "+0%"
+        tts_engine = "edge_tts"
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"

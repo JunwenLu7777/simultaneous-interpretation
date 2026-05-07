@@ -150,7 +150,7 @@
 
 **部分通过 → 见下方复杂度追踪行 1 / 2 / 3 / 4**。
 
-- **首段译音 p50 ≤ 1200 ms（硬阈值）/ ≤ 1000 ms（软目标）**（2026-05-07 宪章修订自 ≤ 800 ms）：Stage 5c 已把生产 streaming 路径改为 MT delta → early TTS，复测显示下行 BM-10D p50 904.8 ms / p95 1784.6 ms 已达标；上行 BM-10 p50 1565.5 ms / p95 1594.4 ms 仍超过硬阈值。复杂度追踪行 3 / 4 的历史处置只关闭了旧阈值与 Edge-TTS 风险，不再构成发布放行证据；下一步必须缩短上行切段、预热 / 复用 Piper voice，或重审上行阈值。
+- **首段译音 p50 ≤ 1200 ms（硬阈值）/ ≤ 1000 ms（软目标）**（2026-05-07 宪章修订自 ≤ 800 ms）：Stage 5d 已把生产 streaming 路径改为 MT delta → early TTS，并对 Piper client 做模型目录级复用和方向 voice 预热；无人值守复测显示上行 BM-10 p50 971.3 ms / p95 1726.4 ms、下行 BM-10D p50 929.7 ms / p95 1389.9 ms，均达硬阈值、软目标和 p95 预算。复杂度追踪行 3 / 4 的历史处置已由 Stage 5d 真实数据关闭；发布前仍需补真实 Teams / BlackHole smoke。
 - 端到端 p50 ≤ 2.5 s / p95 ≤ 4.0 s：可达成
 - LLM 首 token ≤ 800 ms：DeepSeek streaming 实测中位 200–400 ms，可达成
 - LLM 整段 ≤ 1.5 s：可达成

@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import cast
 
@@ -35,7 +36,7 @@ from teams_voice_interpreter.tts.audio_decode import (
     decode_pcm_stream_to_pcm16,
 )
 from teams_voice_interpreter.tts.edge_tts_client import TTSEvent
-from teams_voice_interpreter.tts.factory import build_tts_client
+from teams_voice_interpreter.tts.factory import build_tts_client, prewarm_tts_client
 from teams_voice_interpreter.tts.streaming import stream_pcm_chunks_with_retry
 
 Int16Array = npt.NDArray[np.int16]
@@ -483,6 +484,9 @@ class _EarlyTranslationPCMStream:
         pending_text = ""
         emitted_first_piece = False
         first_tts_task: asyncio.Task[None] | None = None
+        prewarm_task = asyncio.create_task(
+            asyncio.to_thread(prewarm_tts_client, settings, direction=direction)
+        )
         try:
             iterator = DeepSeekStreamingClient(
                 api_key=settings.resolved_deepseek_api_key(),
@@ -533,8 +537,12 @@ class _EarlyTranslationPCMStream:
                 first_byte_timeout_s=first_byte_timeout_s,
                 synthesis_timeout_s=synthesis_timeout_s,
                 first_tts_task=first_tts_task,
+                prewarm_task=prewarm_task,
             )
         except Exception as error:
+            prewarm_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await prewarm_task
             self._put_ready_once(error)
             self._put_pcm(error)
         finally:
@@ -552,8 +560,10 @@ class _EarlyTranslationPCMStream:
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
         first_tts_task: asyncio.Task[None] | None,
+        prewarm_task: asyncio.Task[None],
     ) -> None:
         text = pending_text.strip()
+        await prewarm_task
         if first_tts_task is not None:
             await first_tts_task
         if not text:

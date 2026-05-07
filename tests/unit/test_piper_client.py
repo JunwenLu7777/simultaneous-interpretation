@@ -209,6 +209,23 @@ def test_validate_voice_fails_when_only_onnx_present_without_json(tmp_path: Path
         client.validate_voice("en_US-amy-medium")
 
 
+def test_preload_voice_loads_direction_voice_once(tmp_path: Path) -> None:
+    """preload_voice 应提前加载 voice，后续合成不再重复触发 voice_loader。"""
+    load_count = 0
+
+    def loader(_path: str) -> _FakePiperVoice:
+        nonlocal load_count
+        load_count += 1
+        return _FakePiperVoice(chunks=[b"pcm"])
+
+    client = _make_client(tmp_path, voice_loader=loader)
+
+    client.preload_voice(direction=AudioDirection.UPLINK)
+    client.preload_voice(direction=AudioDirection.UPLINK)
+
+    assert load_count == 1
+
+
 @pytest.mark.asyncio
 async def test_voice_loader_is_cached_across_calls(tmp_path: Path) -> None:
     """相同 voice 多次调用时 voice_loader 只触发一次（生产环境避免重复加载 ONNX）。"""
