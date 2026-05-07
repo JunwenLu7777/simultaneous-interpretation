@@ -187,6 +187,7 @@ class LiveSayBridge:
                     target_text=target_text,
                     direction=direction,
                     rate=settings.tts_rate,
+                    settings=settings,
                     max_retries=1,
                     first_byte_timeout_s=REALTIME_TTS_FIRST_BYTE_TIMEOUT_S,
                     synthesis_timeout_s=REALTIME_TTS_SYNTHESIS_TIMEOUT_S,
