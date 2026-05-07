@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 
 import numpy as np
 
+from teams_voice_interpreter.config import Settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.tts import streaming as streaming_mod
 from teams_voice_interpreter.tts.streaming import start_pcm_stream_with_retry
@@ -22,11 +23,20 @@ def test_start_pcm_stream_with_retry_starts_producer_before_first_consume(monkey
         target_text: str,
         direction: AudioDirection,
         rate: str,
+        settings: Settings | None = None,
         max_retries: int,
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
     ) -> AsyncIterator[np.ndarray]:
-        del target_text, direction, rate, max_retries, first_byte_timeout_s, synthesis_timeout_s
+        del (
+            target_text,
+            direction,
+            rate,
+            settings,
+            max_retries,
+            first_byte_timeout_s,
+            synthesis_timeout_s,
+        )
         started.set()
         yield np.array([1, 2, 3], dtype=np.int16)
 
@@ -59,11 +69,20 @@ def test_threaded_pcm_stream_can_be_closed_before_consuming_all_chunks(monkeypat
         target_text: str,
         direction: AudioDirection,
         rate: str,
+        settings: Settings | None = None,
         max_retries: int,
         first_byte_timeout_s: float,
         synthesis_timeout_s: float,
     ) -> AsyncIterator[np.ndarray]:
-        del target_text, direction, rate, max_retries, first_byte_timeout_s, synthesis_timeout_s
+        del (
+            target_text,
+            direction,
+            rate,
+            settings,
+            max_retries,
+            first_byte_timeout_s,
+            synthesis_timeout_s,
+        )
         try:
             while True:
                 yield np.array([1, 2, 3], dtype=np.int16)
