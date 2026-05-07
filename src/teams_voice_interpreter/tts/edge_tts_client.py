@@ -24,11 +24,20 @@ SYNTHESIS_TIMEOUT_S = 15.0
 
 @dataclass(frozen=True)
 class TTSEvent:
-    """TTS 流式事件。"""
+    """TTS 流式事件。
+
+    `audio_format` 让下游解码路径分流：
+    - `"mp3"`：Edge-TTS 默认；下游用 `tts.audio_decode.decode_mp3_stream_to_pcm16`
+      （PyAV 增量解码 + 重采到 16 kHz mono）。
+    - `"pcm_s16le_22050"`：Piper 默认（22050 Hz mono int16 raw）；下游用
+      `tts.audio_decode.decode_pcm_stream_to_pcm16` 重采到 16 kHz mono。
+    新增 backend 时按 `<codec>_s16le_<rate>` 命名扩展。
+    """
 
     kind: str
     audio_chunk: bytes = b""
     latency_ms: int = 0
+    audio_format: str = "mp3"
 
 
 class CommunicateLike(Protocol):

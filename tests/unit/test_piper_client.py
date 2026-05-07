@@ -97,6 +97,8 @@ async def test_stream_synthesize_yields_first_byte_then_audio_then_completed(
     assert events[1].audio_chunk == b"pcm1"
     assert events[2].audio_chunk == b"pcm2"
     assert isinstance(events[0], TTSEvent)
+    # 所有 event 必须标注 raw PCM @ 22050 Hz，让下游 audio_decode 选 PCM 路径。
+    assert all(event.audio_format == "pcm_s16le_22050" for event in events)
 
 
 @pytest.mark.asyncio

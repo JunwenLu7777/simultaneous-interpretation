@@ -13,6 +13,7 @@ from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.tts.audio_decode import (
     decode_mp3_bytes_to_pcm16,
     decode_mp3_stream_to_pcm16,
+    decode_pcm_stream_to_pcm16,
 )
 
 
@@ -69,6 +70,69 @@ async def test_decode_mp3_stream_to_pcm16_wraps_corrupt_mp3_as_user_error() -> N
 
 async def _collect_pcm(mp3_chunks: AsyncIterator[bytes]) -> list[np.ndarray]:
     return [chunk async for chunk in decode_mp3_stream_to_pcm16(mp3_chunks)]
+
+
+@pytest.mark.asyncio
+async def test_decode_pcm_stream_to_pcm16_resamples_22050_to_16000() -> None:
+    """raw PCM @ 22050 Hz 必须按 16/22.05 比例下采到 16 kHz。"""
+    samples_in = (np.sin(np.linspace(0, 40, 2205)) * 12000).astype(np.int16)
+    pcm_chunks = await _collect_pcm_stream(_pcm_chunks([samples_in.tobytes()]))
+
+    assert pcm_chunks
+    total = np.concatenate(pcm_chunks)
+    assert total.dtype == np.int16
+    expected_size = int(round(samples_in.size * 16000 / 22050))
+    assert abs(total.size - expected_size) <= 1
+
+
+@pytest.mark.asyncio
+async def test_decode_pcm_stream_to_pcm16_passes_through_when_rates_match() -> None:
+    """源 / 目标采样率相同时不应额外重采（避免无意义 round-trip）。"""
+    samples_in = np.array([0, 1000, -1000, 2000, -2000], dtype=np.int16)
+    pcm_chunks = await _collect_pcm_stream(
+        _pcm_chunks([samples_in.tobytes()]),
+        source_sample_rate_hz=16000,
+        target_sample_rate_hz=16000,
+    )
+
+    assert pcm_chunks
+    assert np.concatenate(pcm_chunks).tolist() == samples_in.tolist()
+
+
+@pytest.mark.asyncio
+async def test_decode_pcm_stream_to_pcm16_skips_empty_chunks() -> None:
+    """空 bytes / 零长度 chunk 必须跳过，不向下游 yield。"""
+    samples_in = np.array([0, 1000, -1000], dtype=np.int16)
+    chunks = [b"", samples_in.tobytes(), b""]
+    pcm_chunks = await _collect_pcm_stream(
+        _pcm_chunks(chunks),
+        source_sample_rate_hz=16000,
+        target_sample_rate_hz=16000,
+    )
+
+    assert len(pcm_chunks) == 1
+    assert pcm_chunks[0].tolist() == samples_in.tolist()
+
+
+async def _collect_pcm_stream(
+    pcm_chunks: AsyncIterator[bytes],
+    *,
+    source_sample_rate_hz: int = 22050,
+    target_sample_rate_hz: int = 16000,
+) -> list[np.ndarray]:
+    return [
+        chunk
+        async for chunk in decode_pcm_stream_to_pcm16(
+            pcm_chunks,
+            source_sample_rate_hz=source_sample_rate_hz,
+            target_sample_rate_hz=target_sample_rate_hz,
+        )
+    ]
+
+
+async def _pcm_chunks(chunks: list[bytes]) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        yield chunk
 
 
 async def _mp3_chunks(chunks: list[bytes]) -> AsyncIterator[bytes]:

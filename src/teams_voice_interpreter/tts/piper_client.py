@@ -36,8 +36,11 @@ DEFAULT_PIPER_VOICES = {
 }
 
 # Piper voice 默认采样率。两个项目默认 voice 当前都是 22050 Hz；如果未来引入
-# 16 kHz / 48 kHz voice，应当从 PiperVoice config 读取（保留给阶段 3）。
+# 16 kHz / 48 kHz voice，应当从 PiperVoice config 读取（保留给阶段 3b）。
 PIPER_OUTPUT_SAMPLE_RATE_HZ = 22050
+# TTSEvent.audio_format 标识：raw little-endian int16 mono PCM @ 22050 Hz。
+# 下游 (tts/audio_decode.decode_pcm_stream_to_pcm16) 按此分支。
+PIPER_AUDIO_FORMAT = f"pcm_s16le_{PIPER_OUTPUT_SAMPLE_RATE_HZ}"
 
 
 @dataclass(frozen=True)
@@ -127,10 +130,18 @@ class PiperClient:
                 if not pcm:
                     continue
                 if first:
-                    yield TTSEvent(kind="first_byte", audio_chunk=pcm)
+                    yield TTSEvent(
+                        kind="first_byte",
+                        audio_chunk=pcm,
+                        audio_format=PIPER_AUDIO_FORMAT,
+                    )
                     first = False
                 else:
-                    yield TTSEvent(kind="audio_chunk", audio_chunk=pcm)
+                    yield TTSEvent(
+                        kind="audio_chunk",
+                        audio_chunk=pcm,
+                        audio_format=PIPER_AUDIO_FORMAT,
+                    )
         except PiperTTSError:
             raise
         except Exception as error:  # ONNX runtime / IO / 模型损坏
@@ -151,7 +162,7 @@ class PiperClient:
                     "下一步如何做：请重试一次；如果持续失败，请把终端里显示的识别文本发给我。"
                 ),
             )
-        yield TTSEvent(kind="completed")
+        yield TTSEvent(kind="completed", audio_format=PIPER_AUDIO_FORMAT)
 
     def _get_or_load(self, voice: str) -> Any:
         if voice not in self._loaded:

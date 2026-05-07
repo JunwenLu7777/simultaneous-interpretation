@@ -1,4 +1,10 @@
-"""Edge-TTS 输出音频解码。"""
+"""TTS 输出音频解码（mp3 与 raw PCM 两条路径）。
+
+Edge-TTS 输出 mp3 chunks，走 `decode_mp3_stream_to_pcm16` (PyAV)。
+Piper 输出 raw int16 PCM @ 22050 Hz，走 `decode_pcm_stream_to_pcm16`
+（仅做线性重采到 16 kHz mono）。两条路径输出形式都是 `Int16Array`
+@ 16 kHz mono，以保持下游 (StreamAudioWriter / live_say) 一致。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
+from teams_voice_interpreter.audio.resample import resample_int16_mono
 from teams_voice_interpreter.errors import UserFacingError
 
 Runner = Callable[[list[str]], None]
@@ -91,6 +98,35 @@ async def decode_mp3_stream_to_pcm16(
         raise _decode_failed_error(last_error)
     if final_pcm.size > yielded_samples:
         yield final_pcm[yielded_samples:]
+
+
+async def decode_pcm_stream_to_pcm16(
+    pcm_chunks: AsyncIterator[bytes],
+    *,
+    source_sample_rate_hz: int = 22050,
+    target_sample_rate_hz: int = 16000,
+) -> AsyncIterator[Int16Array]:
+    """把 raw int16 PCM mono bytes 流增量重采到目标 sample rate。
+
+    用于 PiperClient 等输出 raw PCM 的 TTS 引擎。**逐 chunk 重采**，不在
+    chunk 边界保持滤波器上下文 —— Piper 的 `AudioChunk` 是相对独立的
+    短语片段（语段边界由模型决定），在普通商务话术下边界 artifact 不
+    可感；如果 chunk 切分细到字 / 子词级别，应改为 stateful resampler
+    （留给阶段 3b 集成时根据真实听感决定）。
+    """
+    async for chunk in pcm_chunks:
+        if not chunk:
+            continue
+        samples = np.frombuffer(chunk, dtype="<i2").astype(np.int16)
+        if samples.size == 0:
+            continue
+        resampled = resample_int16_mono(
+            samples,
+            source_rate_hz=source_sample_rate_hz,
+            target_rate_hz=target_sample_rate_hz,
+        )
+        if resampled.size > 0:
+            yield resampled
 
 
 def _run_afconvert(command: list[str]) -> None:
