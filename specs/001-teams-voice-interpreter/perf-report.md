@@ -3,14 +3,14 @@
 **日期**：2026-05-05
 **Git commit**：当前 HEAD；本报告不内嵌自引用提交哈希，使用 `git log -1 --oneline` 核验
 **硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Edge-TTS 外网基准待发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）均有可执行测试入口并在当前模拟基准下通过。当前报告用于实现期门禁闭合；发布前必须在真实 M2 Pro 16 GB / macOS 13+ / Wi-Fi ≥ 50 Mbps 环境复跑并替换模拟数据。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已对 BM-4 完成真实化测量、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 真实首字节延迟 p50 566-598 ms 超 400 ms 预算（Fail）**；C+α 测得整段 ASR ≤ 310 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**当前 BM-4 实测已使 SC-001 ≤ 800 ms 在当前服务栈下结构性 fail-closed**（ASR 297 ms + MT first token 566 ms 单项即 863 ms，加任何 TTS 必超），详见「DeepSeek MT first token 真实化（BM-4）」段。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
 | BM-1 | SC-010 / 宪章 IV | RAM 420 MB | ≤ 500 MB | Pass | 无 |
 | BM-2 | SC-005 | WER 优势 6% | ≥ 5% | Pass | 无 |
 | BM-3 | SC-010 / 宪章 IV | CPU 24% | ≤ 30% | Pass | 无 |
-| BM-4 | 宪章 IV | MT first token p50 320 ms / p95 700 ms | p50 ≤ 400 ms / p95 ≤ 800 ms | Pass | 无 |
+| BM-4 | 宪章 IV | MT first token p50 598 ms / p95 753 ms（2026-05-07 真实化，上下行最差值；上行 p50 566 / 下行 p50 598） | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50)** | 重审 SC-001 阈值或换 MT 服务栈，详见「DeepSeek MT first token 真实化（BM-4）」 |
 | BM-5 | SC-005 / FR-012 | 保真 96% / 术语延迟增量 120 ms | ≥ 95% / ≤ 200 ms | Pass | 无 |
 | BM-6 | SC-001 / SC-002 | TTS first byte p50 260 ms / p95 620 ms | p50 ≤ 400 ms / p95 ≤ 800 ms | Pass | 无 |
 | BM-7 | Edge-TTS 稳定性 | 401/403 失败率 0.1% | < 0.5% | Pass | 无 |
@@ -97,7 +97,51 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 
 **streaming ASR 决策当前被 BM-4 / BM-6 的 stub 状态前置阻塞**，下一程应当用与本探针对仗的轻量脚本（DeepSeek 用文本输入、Edge-TTS 用文本输入，**不需要 fixture**）真测 DeepSeek + Edge-TTS 首字节延迟，再回到本节给出的三档断言执行。
 
+**进展更新（2026-05-07）**：BM-4 已真实化，p50 566-598 ms（详见「DeepSeek MT first token 真实化（BM-4）」段）。结果落在第三档「≥ 750 ms」—— 单 BM-4 已 ≥ 566 ms，加任何 BM-6 必超 750 ms。**streaming ASR 决策已锁定为"暂缓"**：即使把 ASR 压到 0 ms 也救不了 SC-001。BM-6 真实化仍有价值（提供宪章修订 PR 的完整数据），但 streaming ASR 投入不再被它阻塞，而是被"是否修订 SC-001 / 是否换 MT 服务栈"前置。
+
 **主表数据真实化进展**：本次 C+α 是 perf-report 里**第一份**真实测量到主表落地的数据点（不计 D 探针，那是实验路径）。主表 BM 已确认 stub 的有：BM-4 (DeepSeek)、BM-6 (TTS)、BM-10 (上行首段)、BM-12 (长会话稳定性)；其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。所有 BM 的真实化是 SC-001 / SC-003 等达标判断的前置条件，发布前必须完成（与 perf-report 顶部"发布前必须复跑"约束一致）。
+
+## DeepSeek MT first token 真实化（BM-4）
+
+**日期**：2026-05-07
+**目的**：把 BM-4（DeepSeek MT first token 延迟）从主表 stub（p50 320 ms / p95 700 ms 占位）替换为真实测量。回答 C+α 段提出的"streaming ASR 决策三档断言"中 BM-4 真实数字落在哪一档。
+**样本**：上行 zh 15 句 + 下行 en 15 句，覆盖短 / 中 / 长（4-30 字 / 词），含数字、业务术语、专有名词；30/30 调用全部成功。
+**模型**：`deepseek-v4-flash`（生产管线默认）。
+**命令入口**：`uv run --extra dev scripts/measure_deepseek_first_token.py --samples-per-direction 15 --proof-json /tmp/deepseek-first-token.json`
+**口径**：测量 `DeepSeekStreamingClient.stream_translate(text, direction=...)` 从迭代开始到首个 `kind="delta"` chunk 到达的 wall-clock 耗时；每次调用消费到 `kind="completed"` 才计入下一次，避免 async generator 与 HTTP 连接泄露。
+
+| 方向 | 成功 | 失败 | p50 | p95 | avg | max |
+|------|------|------|-----|-----|-----|-----|
+| uplink | 15 | 0 | 566.2 ms | 752.6 ms | 572.8 ms | 752.6 ms |
+| downlink | 15 | 0 | 598.3 ms | 751.1 ms | 589.8 ms | 751.1 ms |
+
+**关键观察**：
+
+1. **真实 p50 比 BM-4 stub (320 ms) 高 76-87%**。stub 是无源占位数字，与 deepseek-v4-flash 实际 prefill + scheduler 队列等待时间不符。
+2. **上下行 p50 差仅 5%（566 vs 598 ms）**，且 first token 与输入文本长度弱相关（最短句 "你好" 569 ms vs 最长句"我们计划在第三季度推出..." 712 ms）—— 与 LLM streaming 推理 prefill-dominated 特性吻合，与文本量主导相反。
+3. **p50 / p95 双双顶到预算上限**：p50 (566-598 ms) 超 400 ms 预算 **41-50%（Fail）**；p95 (751-753 ms) 卡 800 ms 预算 6%（Pass 但无安全边际）。
+4. **分布紧实，无长尾**（avg 与 p50 差 < 10 ms；max = p95）—— 不是抖动 / 长尾问题，是 deepseek-v4-flash 整体 first token 基线就在 ~580 ms。换其他通用 LLM（gpt-4o-mini / claude-haiku）大概率落在同量级，不会显著改善。
+
+**对 SC-001 ≤ 800 ms 的影响（结构性结论）**：
+
+结合 BM-10 (C+α) 实测 ASR ≈ 270-310 ms，可累加（TTS first byte 仍是 stub，按预算上限 260 ms 估）：
+
+- 上行 SC-001 链路 = ASR 297 ms + MT 566 ms + TTS ≥ 260 ms ≈ **≥ 1123 ms**（超预算 40%）
+- 下行 SC-001 链路 = ASR 270 ms + MT 598 ms + TTS ≥ 260 ms ≈ **≥ 1128 ms**（超预算 41%）
+
+仅 ASR + MT 即 ≈ 863-868 ms，已超 SC-001 ≤ 800 ms 预算 ~70 ms，加任何 TTS 都不可能进到 800 ms 内。**streaming ASR 即使把 ASR 压到 0 ms 也救不了 SC-001**，因为 DeepSeek p50 566 ms 单项已吃 71% 预算。
+
+**回到 C+α 段的三档断言**：
+
+- ✗ ≤ 490 ms（streaming ASR 不需要做）—— 不成立
+- ✗ 491-750 ms（边际收益，调 VAD 切短即可）—— 不成立
+- ✓ **≥ 750 ms** —— 成立。BM-4 alone 已 ≥ 566 ms，加任何 BM-6 必超 750 ms。**需重审 SC-001 阈值或换 MT/TTS 服务栈**。
+
+**下一程候选（按"投入产出比"排序）**：
+
+1. **审视 SC-001 ≤ 800 ms 阈值的合理性**（最高优先级）：主流 streaming MT + streaming TTS 服务栈下 1.0-1.5 s 是现实首段延迟。考虑把 SC-001 放宽到 1.2-1.5 s 并对应修订宪章原则 IV，等同于把"准入条件"对齐"现实条件"。这是无工程成本但需对齐的决策。
+2. **测 BM-6 (Edge-TTS first byte) 真实化**：与本探针对仗的脚本，~ 1-2 小时。即使 BM-6 真实 ≤ 200 ms，SC-001 已 fail-closed；但补齐数据是宪章修订 PR 的前置依据。
+3. **streaming ASR 投入暂缓**：实测显示它不是 SC-001 主要瓶颈。除非把 SC-001 重定为 < 600 ms（极端目标），否则其工程复杂度（partial revoke / 顺序保证 / sequence reordering）不能由本数据证明合理。
 
 ## 冷启动与分发形态合规
 
