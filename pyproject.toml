@@ -38,6 +38,8 @@ dev = [
   "mypy>=1.11.0",
   "radon>=6.0.0",
   "respx>=0.21.0",
+  # 仅供 scripts/measure_piper_first_byte.py 探针使用；不进生产管线。
+  "piper-tts>=1.3.0",
 ]
 
 [project.scripts]

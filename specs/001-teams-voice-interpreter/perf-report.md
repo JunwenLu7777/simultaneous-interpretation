@@ -188,6 +188,67 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 
 **继续推进的前置条件**：v1 实现期门禁要求所有 SC 真实化测量落在宪章预算内。当前 BM-4 + BM-6 + C+α 累加已超新 SC-001 硬阈值，**门禁条件不成立**；必须先选定 A/B/C/D 中至少一条并完成关闭，才能继续 v1 后续 BM 真实化与发布动作。
 
+## TTS 引擎对比与 Piper 决策（D 路径）
+
+**日期**：2026-05-07
+**目的**：BM-6 真实化后揭示 Edge-TTS first byte ~800 ms 让 SC-001 ≤ 1200 ms 硬阈值不可达，触发 spec.md SC-001「服务栈替换」修订路径。本节对比三个候选 TTS 引擎在 M3 + 16 GB Mac 上的实测数据，并给出生产管线 TTS 替换决策。
+**样本**：上行 TTS 输入英文译文（音色 `en_US-amy-medium` / `Claribel Dervla` / `en-US-AriaNeural`）+ 下行 TTS 输入中文译文（`zh_CN-huayan-medium` / `Claribel Dervla` / `zh-CN-XiaoxiaoNeural`），每段最多 30 字 / 词；样本与 BM-6 探针一致。
+**命令入口**：
+
+- Edge-TTS：`uv run --extra dev scripts/measure_edge_tts_first_byte.py`
+- Piper：`uv run --extra dev scripts/measure_piper_first_byte.py`
+- XTTS-v2：临时 inline probe（不入库；首次需手动从 https://huggingface.co/coqui/XTTS-v2 下载 model.pth 1.85 GB；CPML 协议非商用免费，与 spec.md L199「v1 个人自用」一致）
+
+| 引擎 | 上行 first byte p50 | 下行 first byte p50 | 资源占用 | License | 集成成本 |
+|------|--------------------:|--------------------:|----------|---------|----------|
+| Edge-TTS（生产基线，BM-6） | 789 ms | 815 ms | 网络 RTT | 微软非官方逆向 | 已集成 |
+| **Piper（推荐）** | **103 ms** | **107 ms** | ~120 MB ONNX 模型 + CPU | MIT 完全免费 | 中等（替换 EdgeTTSClient）|
+| XTTS-v2 | 708-1064 ms | 684-950 ms | ~5 GB（含 PyTorch + 模型）+ MPS | CPML（非商用免费）| 高（PyTorch 依赖 + transformers 版本耦合）|
+
+**关键观察**：
+
+1. **Piper 比 Edge-TTS 快 7.6-7.7 倍**（p50 维度），且 30/30 全成功；本地 ONNX 推理无网络抖动 / TLS / 队列开销，首字节延迟近乎模型推理本身的物理下限。
+2. **XTTS-v2 与 Edge-TTS 同档（甚至略慢）**：cold start 7+ 秒，warm 仍 700-1000 ms。延迟没有优势，但占资源 ~50 倍（5 GB vs 120 MB）。
+3. **Piper p95 (197 ms) 比 Edge-TTS p50 (789 ms) 还快 4 倍**。这是"本地 vs 云"在端到端延迟上的真实差距。
+4. **Piper 中文音色 `zh_CN-huayan-medium` 主观听感"够用"**（本会话用户判断）：清晰度可接受、有轻微"AI 朗读"机器感但不影响商务对话理解。XTTS-v2 中文质量略好但不足以补偿 7 倍延迟差距。
+
+**对端到端 SC-001 的影响（救回 1200 ms 硬阈值）**：
+
+如果换 Piper，端到端实测累加：
+
+| 方向 | ASR | MT first token | TTS first byte (Piper) | AUDIO_ROUTE | 累加 | vs SC-001 |
+|------|---:|---:|---:|---:|---:|---|
+| 上行 | 297 ms | 566 ms | **103 ms** | ~50 ms | **1016 ms** | 进硬阈值 1200 ms，余 184 ms；离软目标 1000 ms 仅 16 ms |
+| 下行 | 270 ms | 598 ms | **107 ms** | ~50 ms | **1025 ms** | 进硬阈值 1200 ms，余 175 ms；离软目标 1000 ms 仅 25 ms |
+
+**对比换 Piper 前**：BM-6 阶段累加 ~1702-1733 ms（超硬阈值 500 ms）→ 换 Piper 后 ~1016-1025 ms（**进硬阈值，且接近软目标**）。**单工程动作（换 TTS）即把 SC-001 从 fail-closed 救回到 Pass + 接近软目标**，无需二次宪章修订。
+
+**决策**：**v1 服务栈 TTS 由 Edge-TTS 替换为 Piper**。理由：
+- 唯一进 SC-001 ≤ 1200 ms 硬阈值的方案
+- 接近 ≤ 1000 ms 软目标（差 16-25 ms）
+- 完全免费 + MIT license + 100 MB 资源占用
+- 无网络依赖（与 spec.md L199「个人自用」边界更契合）
+
+**XTTS-v2 不被采用**的理由：
+- 延迟无优势（同 Edge-TTS）
+- 资源开销 50 倍（5 GB vs 120 MB）
+- transformers 版本耦合（与项目其他升级冲突风险）
+- CPML 商用受限（虽然 v1 是个人自用、暂时合规，但限制未来分发自由）
+
+**下一程**（生产管线集成）：
+
+1. 创建 `src/teams_voice_interpreter/tts/piper_client.py` 实现 `PiperClient.stream_synthesize` 接口（与 `EdgeTTSClient.stream_synthesize` 兼容签名，方便替换）
+2. 修改 `config.py` 加 `piper_models_dir` 配置项 + `tts_engine: Literal["edge_tts", "piper"]` 切换开关
+3. 修改 `readiness.py` 加 Piper 模型存在性 + onnxruntime 可用性检查
+4. 修改 `cli/wizard.py` 引导用户首次运行时下载 Piper voice 模型
+5. 写 `contracts/piper-tts.md`（替换或并行 `contracts/edge-tts.md`）
+6. 修改 `spec.md` v1 服务栈锁定段（Edge-TTS → Piper）+ 子预算约束（TTS first byte ≤ 200 ms 而不是 ≤ 800 ms）
+7. 修改 `plan.md` 性能目标 / 阶段预算 + 复杂度追踪行 4（Edge-TTS 风险关闭）
+8. 集成测试：上行 / 下行端到端首段延迟在 ≤ 1200 ms 内
+9. 更新 `perf-report.md` 主表 BM-6 行（再做一次基于 Piper 的子预算定义 + 实测）
+
+**最近真测发现的子预算修订需求**：现有 BM-6 子预算（first byte p50 ≤ 400 ms / p95 ≤ 800 ms）按 Edge-TTS 量级设定，对 Piper 显著过宽（实测 p50 100 ms / p95 200 ms）。集成 PR 应一并把 BM-6 子预算调整为「first byte p50 ≤ 200 ms / p95 ≤ 400 ms」以反映 Piper 真实下限。
+
 ## 冷启动与分发形态合规
 
 - 已安装环境冷启动：模拟 p95 3.2 秒，满足 SC-012 ≤ 10 秒。
