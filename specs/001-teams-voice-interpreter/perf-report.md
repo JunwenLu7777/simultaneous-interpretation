@@ -60,6 +60,45 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 
 **Fail 触发字段说明**：上下行两表共 8 行 Fail 全部由 `first_confirmed_ready_partial_s > 1.20 s` 触发；CER 列（上行 0.107 / 下行 0.109）均**未**触发 0.12 阈值。读者不应把 CER 列邻接 Fail 字符串误读为 CER 共同贡献了 Fail。
 
+## ASR 整段耗时 vs 段长（C+α 测量）
+
+**日期**：2026-05-07
+**目的**：用 macOS `say` 合成上下行各 3 档不同长度的单句 WAV，分别走整段 Whisper.cpp ASR，记录 audio duration 与 ASR final 耗时。回答"SC-001 ≤ 800 ms 首段延迟预算下，长段语音是否让 ASR 成为主导项"。
+**音频源**：上行 `say -v Tingting`（zh）/ 下行 `say -v Samantha`（en），16 kHz mono PCM16；机器音质比真人偏乐观，但本探针只做数量级判断（ASR 是否吃掉一半以上预算），偏差可接受。
+**模型**：`small-q5_1`（与生产管线一致），M3 + Metal + flash attention。同方向第 2 段起共用预热后的 transcriber 实例。
+**命令入口**：`uv run --extra dev scripts/measure_asr_segment_latency.py --proof-json /tmp/asr-segment-latency.json`
+**口径**：测量 `WhisperOneShotTranscriber.transcribe(samples)` 的同步耗时（`final_asr_s`），不含 VAD 切段、prompt 构建、tokenize 输出。
+
+| 方向 | 音色 | 目标段长 | 实际段长 | ASR final 耗时 | ASR 占比 (final/duration) | 原文 |
+|------|------|---------|----------|----------------|---------------------------|------|
+| uplink | `Tingting` | 3.0 s | 1.99 s | 0.297 s | 14.95% | 下次会议三点开始 |
+| uplink | `Tingting` | 6.0 s | 4.02 s | 0.308 s | 7.66% | 请把上季度的销售数据汇总后发给市场部 |
+| uplink | `Tingting` | 10.0 s | 8.53 s | 0.394 s | 4.63% | 我们计划在第三季度推出云端协同与数据分析两个核心新功能并提前两周开放灰度测试 |
+| downlink | `Samantha` | 3.0 s | 1.56 s | 0.263 s | 16.83% | Let's start the meeting at three. |
+| downlink | `Samantha` | 6.0 s | 3.84 s | 0.270 s | 7.03% | Please send the consolidated sales data from last quarter to marketing. |
+| downlink | `Samantha` | 10.0 s | 5.96 s | 0.306 s | 5.14% | We plan to launch cloud collaboration and analytics in the third quarter and open a beta two weeks ahead of release. |
+
+**关键观察**：
+
+1. **ASR 整段耗时与段长几乎解耦**：1.6 s 段 → 0.26 s ASR；8.5 s 段 → 0.39 s ASR。段长每加 1 s，ASR 只增 ~15-20 ms。说明 small-q5_1 在 M3 + Metal 上以「常数项 + 与段长弱相关项」结构运行，常数项主导。
+2. **上下行 ASR 速度差异极小**（同长度 < 30 ms）。结合 D 探针的 partial 级 differential（上行 partial 不稳定、下行 partial 稳定），可分离出「整段 ASR 速度」与「partial 字符级稳定性」是**两个独立维度** —— 整段速度两方向相当，但 partial 稳定性差异显著。
+3. **典型生产段长（2-6 s）下 ASR ≤ 310 ms**：占 SC-001 800 ms 预算的 ~38%，远低于"主导项"的 ≥ 50% 阈值。**当前测量数据下，ASR 不是 SC-001 的主导项**。
+
+**关于「是否需要接入真正 streaming ASR」的决策**：本次数据本身**不能**单独回答这个问题，因为它前置依赖另外两项 stub：
+
+- BM-4 DeepSeek MT first token（主表标 320 ms p50）—— `tests/perf/test_deepseek_latency.py` 硬编码返回，未真测
+- BM-6 Edge-TTS first byte（主表标 260 ms p50）—— `tests/perf/test_edge_tts_latency.py` 硬编码返回，未真测
+
+条件断言：
+
+- 若 BM-4 + BM-6 真实首字节延迟 **≤ 490 ms**（800 - ASR 310 ms）→ SC-001 在典型段长下可达，**streaming ASR 不需要做**
+- 若 BM-4 + BM-6 真实加起来 **在 491 - 750 ms 区间** → ASR 优化有边际收益但不结构性必须，可优先调 VAD `chunk_seconds` / `min_speech_ms` 切短
+- 若 BM-4 + BM-6 真实 **≥ 750 ms** → streaming ASR 即使把 ASR 压到 50 ms 也救不了 SC-001，需重新审视 SC-001 阈值或 MT/TTS 服务栈
+
+**streaming ASR 决策当前被 BM-4 / BM-6 的 stub 状态前置阻塞**，下一程应当用与本探针对仗的轻量脚本（DeepSeek 用文本输入、Edge-TTS 用文本输入，**不需要 fixture**）真测 DeepSeek + Edge-TTS 首字节延迟，再回到本节给出的三档断言执行。
+
+**主表数据真实化进展**：本次 C+α 是 perf-report 里**第一份**真实测量到主表落地的数据点（不计 D 探针，那是实验路径）。主表 BM 已确认 stub 的有：BM-4 (DeepSeek)、BM-6 (TTS)、BM-10 (上行首段)、BM-12 (长会话稳定性)；其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。所有 BM 的真实化是 SC-001 / SC-003 等达标判断的前置条件，发布前必须完成（与 perf-report 顶部"发布前必须复跑"约束一致）。
+
 ## 冷启动与分发形态合规
 
 - 已安装环境冷启动：模拟 p95 3.2 秒，满足 SC-012 ≤ 10 秒。
