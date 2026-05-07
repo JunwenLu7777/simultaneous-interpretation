@@ -9,19 +9,19 @@
 
 ## 摘要
 
-本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Edge-TTS** 做流式 TTS，构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 1200 ms 中位（硬阈值）/ ≤ 1000 ms（软目标）、整段端到端 ≤ 2.5 s p50"为目标（首段阈值 2026-05-07 宪章修订 PR 自 ≤ 800 ms 调整，依据 BM-4 / C+α 真测，详见 perf-report.md）；本计划在复杂度追踪中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并要求在 US1 生产实现前通过基线 benchmark 决定是降档到量化模型、替换服务栈，还是触发宪章 IV 预算修订流程。
+本 feature 在 macOS 上交付一套**双向中英实时语音同传桥**，与 Microsoft Teams 桌面端通过**虚拟音频设备 BlackHole 2ch + 系统原生 Aggregate Device** 完成音频路由；以**本地 Whisper.cpp Streaming** 做流式 STT、**DeepSeek API SSE streaming** 做流式翻译、**Piper 本地 ONNX** 做生产默认流式 TTS（Edge-TTS 仅显式降级），构成"几乎零成本"的服务栈（月度运行成本 < ¥10）。技术形态严格规避原生 macOS App Bundle 与 Teams 插件，采用 **Python 3.11+ 单工程 + 本地 FastAPI 后端 + 单页 HTMX 前端**；用户表面为 CLI 子命令 + `http://localhost:8765` Web 控制台。性能上以"首段译音 ≤ 1200 ms 中位（硬阈值）/ ≤ 1000 ms（软目标）、整段端到端 ≤ 2.5 s p50"为目标（首段阈值 2026-05-07 宪章修订 PR 自 ≤ 800 ms 调整，Piper 替换后 BM-4 / C+α / BM-6 累加约 1016-1025 ms，详见 perf-report.md）；本计划在复杂度追踪中显式登记 Whisper.cpp small 与宪章 IV 资源预算的已知冲突，并要求在 US1 生产实现前通过基线 benchmark 决定是降档到量化模型、替换服务栈，还是触发宪章 IV 预算修订流程。
 
 ---
 
 ## 技术上下文
 
-**语言 / 版本**：Python 3.11+（与"优先 Python / Go 脚本语言"用户偏好一致；选 Python 而非 Go 的理由：`whisper.cpp` Python binding、`edge-tts`、`fastapi`、`pydantic` 全在 Python 生态成熟，Go 端等价工具链需自行封装）
+**语言 / 版本**：Python 3.11+（与"优先 Python / Go 脚本语言"用户偏好一致；选 Python 而非 Go 的理由：`whisper.cpp` Python binding、`piper-tts` / `edge-tts`、`fastapi`、`pydantic` 全在 Python 生态成熟，Go 端等价工具链需自行封装）
 
 **主要依赖**：
 
 - **流式 STT**：`pywhispercpp` 或 `whisper-streaming` 包装层（基于 `whisper.cpp`），首选 4-bit 量化模型 `ggml-small-q5_0`；Apple Silicon 启用 Metal 后端 + Core ML encoder offload
 - **流式翻译**：`httpx` 0.27+（DeepSeek `/v1/chat/completions` SSE streaming 客户端，`stream=true`）
-- **流式 TTS**：`edge-tts` 7.0+（社区维护的 Microsoft Edge 浏览器免费 TTS 客户端）
+- **流式 TTS**：`piper-tts` + `onnxruntime`（生产默认，本地 ONNX 推理；默认 voice `en_US-amy-medium` / `zh_CN-huayan-medium`）；`edge-tts` 7.0+ 仅作为显式降级路径
 - **音频 I/O**：`sounddevice` 0.4+（PortAudio 跨平台 CoreAudio 客户端，含设备枚举）+ `numpy` 1.26+（ring buffer / 重采样）
 - **VAD**：`webrtcvad` 2.0+（对应 FR-013 的 5 秒静音闭合）
 - **Web 后端**：`fastapi` 0.115+ + `uvicorn` 0.30+ + `websockets` 12+（用于状态面板的 ≥ 5 Hz 推送）
@@ -37,6 +37,7 @@
 - `~/.config/teams-voice-interpreter/config.toml`：API 凭证引用、端口、模型档位
 - `~/.config/teams-voice-interpreter/glossary.toml`：用户术语表（FR-012 / GlossaryEntry）
 - `~/.cache/teams-voice-interpreter/whisper-models/`：Whisper.cpp 量化模型缓存
+- `~/.cache/teams-voice-interpreter/piper-models/`：Piper 默认 voice 模型缓存（`*.onnx` + `*.onnx.json`）
 - `~/.cache/teams-voice-interpreter/crash-<unix-ts>.log`：匿名崩溃报告（FR-029，最多 20 份轮转）
 - 用户主动导出：`teams-session-<开始时间戳>.md`（用户在 Web 控制台选择下载位置；FR-027）
 
@@ -72,7 +73,7 @@
 | `STT_FINAL` | VAD close_segment 后 ≤ 200 ms | 上行 / 下行 | BM-1 / FR-013 |
 | `MT_FIRST_TOKEN` | p50 ≤ 400 ms，p95 ≤ 800 ms | 中→英 / 英→中 | BM-4 |
 | `MT_COMPLETED` | p50 ≤ 1.5 s，p95 ≤ 2.5 s | 中→英 / 英→中 | BM-4 / SC-003 |
-| `TTS_FIRST_BYTE` | p50 ≤ 400 ms，p95 ≤ 800 ms | 英文 / 中文 | BM-6 |
+| `TTS_FIRST_BYTE` | p50 ≤ 200 ms，p95 ≤ 400 ms | 英文 / 中文 | BM-6（Piper 默认路径） |
 | `TTS_COMPLETED` | p50 ≤ 1.5 s | 英文 / 中文 | BM-6 / SC-003 |
 | `AUDIO_ROUTE` | p95 ≤ 50 ms；Aggregate jitter p95 ≤ 10 ms | BlackHole / 默认输出 | BM-8 / BM-9 |
 | `E2E_FIRST_SEG` | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软），p95 ≤ 2.0 s | 上行 / 下行 | BM-10 / BM-10D / SC-001 / SC-002（2026-05-07 宪章修订）|
@@ -86,7 +87,7 @@
 - **不得**默认在磁盘 / 远端持久化原始音频或对话文本（FR-023 / FR-024）
 - **不得**整段录制后处理（FR-025）
 - **不得**引入 launchd / supervisord / pm2 等系统级守护（FR-028）
-- 服务栈锁定：DeepSeek（翻译）+ Whisper.cpp small q5_0（STT）+ Edge-TTS（TTS）+ BlackHole 2ch（虚拟音频）
+- 服务栈锁定：DeepSeek（翻译）+ Whisper.cpp small q5_0（STT）+ Piper（TTS 默认）+ BlackHole 2ch（虚拟音频）；Edge-TTS 仅作为显式降级
 - 单实例单会话（FR-026）；多会话并行延至 v2
 
 **规模 / 范围**：
@@ -126,10 +127,10 @@
 |---|---|---|---|
 | 单元 | `tests/unit/<module>/` | 行覆盖 ≥ 80% | 每个数据模型、VAD 阈值、重连退避曲线、术语表 prompt 拼装、单实例锁、SessionId 生成 |
 | 集成 | `tests/integration/` | 端到端用户故事 | `test_uplink_pipeline`（US1）、`test_downlink_pipeline`（US2）、`test_status_panel`（US3）、`test_supervisor`（US4 + FR-028）、`test_export`（FR-027） |
-| 契约 | `tests/contract/` | 第三方边界 100% 分支 | DeepSeek streaming、edge-tts、whisper.cpp Python binding（含网络瞬断、配额耗尽、模型加载失败、partial token 顺序错乱等分支） |
+| 契约 | `tests/contract/` | 第三方边界 100% 分支 | DeepSeek streaming、Piper / Edge-TTS、whisper.cpp Python binding（含网络瞬断、配额耗尽、模型加载失败、partial token 顺序错乱等分支） |
 | Perf | `tests/perf/` | 宪章 IV 全部预算 | first-segment latency、end-to-end latency、long-session-stability、memory-leak、cpu-usage |
 
-- 第三方边界（DeepSeek / Whisper.cpp / edge-tts / sounddevice CoreAudio）必须有契约测试 + 录制 fixture 集成测试；fixture 路径 `tests/<contract|integration>/fixtures/`
+- 第三方边界（DeepSeek / Whisper.cpp / Piper / Edge-TTS 降级 / sounddevice CoreAudio）必须有契约测试 + 录制 fixture 集成测试；fixture 路径 `tests/<contract|integration>/fixtures/`
 - CI 强制运行 perf 回归测试（`pytest tests/perf/ --benchmark-fail-on-regression`）；任一预算违例自动阻断合并
 - skip / xfail 必须关联 GitHub issue；无 issue 的 skip 视为缺陷
 
@@ -149,7 +150,7 @@
 
 **部分通过 → 见下方复杂度追踪行 1 / 2 / 3 / 4**。
 
-- **首段译音 p50 ≤ 1200 ms（硬阈值）/ ≤ 1000 ms（软目标）**（2026-05-07 宪章修订自 ≤ 800 ms）：BM-4 / C+α 真测累加 ≈ 1113 ms，落在硬阈值内；软目标差距 ~113 ms，作为持续优化方向。复杂度追踪行 3 已 R3 关闭。
+- **首段译音 p50 ≤ 1200 ms（硬阈值）/ ≤ 1000 ms（软目标）**（2026-05-07 宪章修订自 ≤ 800 ms）：BM-4 / C+α / BM-6 Piper 子段真测累加 ≈ 1016-1025 ms，显示默认服务栈有望落在硬阈值内、接近软目标；但 SC-001 / SC-002 端到端门禁仍需 BM-10 / BM-10D 真机复跑确认。复杂度追踪行 3 已 R3 关闭，行 4 已 R4 替换关闭；发布前不得把子段累加等同为端到端 Pass。
 - 端到端 p50 ≤ 2.5 s / p95 ≤ 4.0 s：可达成
 - LLM 首 token ≤ 800 ms：DeepSeek streaming 实测中位 200–400 ms，可达成
 - LLM 整段 ≤ 1.5 s：可达成
@@ -174,7 +175,7 @@
 - `sc_refs`：关联的 SC / FR / 宪章条款
 - `git_commit`、`timestamp`、`operator`
 - `hardware`：机型、CPU/GPU、RAM、macOS 版本、架构
-- `dependency_versions`：`whisper.cpp` / `pywhispercpp` / `edge-tts` / `httpx` / `fastapi` / `sounddevice`
+- `dependency_versions`：`whisper.cpp` / `pywhispercpp` / `piper-tts` / `onnxruntime` / `edge-tts` / `httpx` / `fastapi` / `sounddevice`
 - `model_artifacts`：模型文件名、SHA256、whisper.cpp commit 或 tag、Core ML / Metal 开关
 - `network_profile`：地区、网络类型、带宽、目标域名 RTT、TLS 是否复用
 - `workload`：fixture 名称、SHA256、样本量、持续时间、方向
@@ -223,7 +224,8 @@ specs/001-teams-voice-interpreter/
 ├── perf-report.md       # US1 生产实现前由 benchmark 门禁任务产出首版（后续故事继续补齐）
 ├── contracts/           # 阶段 1 输出（外部接口契约）
 │   ├── deepseek-translate.md
-│   ├── edge-tts.md
+│   ├── edge-tts.md          # 显式降级路径
+│   ├── piper-tts.md         # v1 生产默认 TTS
 │   ├── whisper-cpp.md
 │   ├── blackhole-coreaudio.md
 │   └── web-control-api.md
@@ -251,8 +253,11 @@ src/teams_voice_interpreter/
 │   ├── deepseek_client.py               # SSE streaming
 │   ├── prompt.py                        # system prompt + GlossaryEntry 注入
 │   └── context_window.py                # FR-012 滚动 8 句上下文
-├── tts/                                 # 流式 TTS（Edge-TTS）
-│   ├── edge_tts_client.py
+├── tts/                                 # 流式 TTS（Piper 默认，Edge-TTS 降级）
+│   ├── factory.py                       # 按 tts_engine 选择 backend
+│   ├── piper_client.py                  # 本地 ONNX 流式合成
+│   ├── edge_tts_client.py               # 显式降级路径
+│   ├── audio_decode.py                  # MP3 / PCM 分支解码
 │   └── audio_writer.py                  # 流式块写入虚拟麦克风 / 默认扬声器
 ├── session/                             # 会话生命周期 + supervisor
 │   ├── manager.py                       # SessionId、单实例锁（FR-026）
@@ -338,7 +343,7 @@ README.md                                  # 含 SC-011 监管严格场景免责
 | **行 1**：Whisper.cpp small 持续 RAM ≈ 1.0–1.5 GB（违反宪章 IV「稳态 RAM ≤ 500 MB」）| spec Q1 用户决定使用本地免费 STT。Whisper tiny（≤ 75 MB 模型 / ~ 200 MB 运行 RAM）准确率明显下降，普通话识别错误率高 ≈ 15%（绝对 WER 增量 + 5–8%，相对增量 ≈ 60%；BM-2 量化），会损害 SC-005「翻译可懂度 ≥ 4/5」。US1 实现前门禁将基线 small 与 tiny 双语方案；≤ 1.6 GB 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成模型降档 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | tiny 准确率不达标；medium / large-v3 RAM 直接 3–6 GB，更不可行；切换到云 STT 违反 spec Q1 用户决定。 | 风险，待 US1 实现前 BM-1 基线；阈值已改为风险观测，不是发布豁免 |
 | **行 2**：Whisper.cpp small 单核 CPU 25–40%（临近违反宪章 IV「稳态 CPU ≤ 30%」）| 同上 spec Q1 决定。US1 实现前门禁将基线 q5_0 / q4_0 量化 + Apple Silicon Metal 后端 + Core ML encoder offload；预期降至 ≤ 25%。≤ 40% 仅作为**风险观测阈值 / 修订触发阈值**，不构成发布放行标准或发布豁免；超过宪章预算时发布必须阻断，直到完成优化 / 服务栈替换，或通过独立宪章修订 PR 正式调整预算。 | 不启用 Metal 后端 CPU 占用更高；切到云 STT 违反 spec Q1。 | 风险，待 US1 实现前 BM-3 基线；阈值已改为风险观测，不是发布豁免 |
 | **行 3**：~~首段译音延迟期望 p50 800–1200 ms（违反 SC-001「中位 ≤ 800 ms」）~~ **R3 (2026-05-07) 已关闭**：通过宪章修订 PR 把 SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms 硬阈值 + ≤ 1000 ms 软目标，p95 从 ≤ 1.5 s 调整为 ≤ 2.0 s。修订依据：BM-4 实测 DeepSeek MT first token p50 566-598 ms + C+α 实测整段 ASR ≤ 310 ms 累加 ≈ 1113 ms，落在新硬阈值内（详见 perf-report.md「DeepSeek MT first token 真实化（BM-4）」段与「ASR 整段耗时 vs 段长（C+α 测量）」段）。> 1500 ms 视为二次修订触发阈值。| 同 R1/R2：本地 STT 物理下限 + spec Q1 零成本约束；硬压 800 ms 会牺牲 partial 稳定性导致幻听激增。 | **R3 已修订并关闭**，2026-05-07 |
-| **行 4**：依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）| spec Q1 用户决定使用免费 TTS。阶段 0 将设计 Coqui XTTS-v2 本地降级路径 + 用户付费切 ElevenLabs / Azure 通道作为备选；首版仍以 Edge-TTS 为默认；**触发条件** = BM-7 24h 401/403 失败率 ≥ 0.5% 或单次会话内 ≥ 3 次连续 401/403。 | 切到付费 TTS 违反 spec Q1 零成本；本地 Coqui 模型 1.8 GB + 推理慢，第一档不优先。 | 风险，已有阶段 0 BM-7 退出计划 |
+| **行 4**：~~依赖非官方 Edge-TTS 接口（与「成熟云服务」原则有距离）~~ **R4 (2026-05-07) 已关闭**：生产默认 TTS 已切到 Piper 本地 ONNX；BM-6 Piper p50 ≈ 103-107 ms，p95 ≈ 197 ms，TTS_FIRST_BYTE 子预算收紧为 p50 ≤ 200 ms / p95 ≤ 400 ms。Edge-TTS 仅保留为 `tts_engine = "edge_tts"` 显式降级路径，不再承担 v1 默认服务栈风险。| 免费 TTS 仍满足 spec Q1；Piper 模型约 120 MB，MIT license，无网络鉴权风险。 | 付费 TTS 仍违反零成本；XTTS-v2 延迟与资源占用不优。 | **R4 已替换并关闭**，2026-05-07 |
 | **行 5**：`src/teams_voice_interpreter/cli/app.py` 854 行（违反宪章 I「单文件应当 ≤ 300 行」）| 该文件汇集 `tvi doctor / serve / start / pause / resume / stop / status / wizard / say / ptt / listen / duplex / export` 等所有用户面 CLI 子命令，并需要在每条命令中按宪章 III 输出「发生了什么 + 用户下一步可以做什么」两段式提示；P1 流式播放又在 listen / duplex playback worker 增加 streaming fallback、PyAV 预热、首字节延迟输出、`prepare / queue / first_pcm / first_write` 延迟剖面，以及实时播放队列过期丢弃/单段限时策略，所以单条命令的 click/typer 装饰器 + 提示模板已超出常规函数体量。为了在 V1 内打通端到端用户路径，先把所有命令集中放置以共享 `load_settings / AudioDeviceProbe / ReadinessChecker / LiveSayBridge / LivePushToTalkBridge` 等单实例。 | 拆出 `cli/commands/` 子模块短期内会让命令注册、共享工具和测试入口翻倍；现阶段优先把真实链路接通并完成延迟定位。 | 临时违例；**退出计划**：在 V1 性能基线复跑后按"短句类（say/ptt/listen）/ 长会话类（serve/start/pause/resume/stop/duplex）/ 诊断类（doctor/wizard/status/export）"三组拆分为 `cli/commands/*.py`，目标单文件 ≤ 300 行；每个子命令组保持独立单测入口；登记日期 2026-05-05。 |
 | **行 6**：`src/teams_voice_interpreter/live_ptt.py` 462 行 | 同时承载 `MicrophoneRecorder / StreamingAudioRecorder / StreamingMicrophoneRecorder / StreamingBlackHoleRecorder / _StableSpeechSegmenter / WhisperOneShotTranscriber / LivePushToTalkBridge` 与配套重采样、VAD、RMS、空音频幻觉阻断工具函数；为保证在 ptt / listen / duplex 之间共享同一套 PCM → Whisper 入口，本期先合并到一个文件。 | 提前拆分会迫使工具函数重复或暴露内部状态；当前一文件内可读且可被单测 mock。 | 临时违例；**退出计划**：在 duplex 真机基线通过后，按"录音器（recorder.py）/ 分段器（segmenter.py）/ 转写器（transcriber.py）/ 桥（bridge.py）"四组拆分；每组保持 ≤ 300 行；登记日期 2026-05-05。 |
 | **行 7**：`src/teams_voice_interpreter/readiness.py` 448 行 | 一个 `ReadinessChecker` 顺序执行 12 项 doctor 检查，每项检查需要给出符合宪章 III 两段式的失败文案与下一步操作；P1 流式播放新增 PyAV 可用性检查后，为避免检查项分散到多个文件让 doctor 输出顺序难以审计，先把全部检查与文案集中。 | 拆成 `readiness/checks/*.py` 会让 12 个子模块都依赖同一份 ReadinessCheck 数据类与设备探针；当前文件可一眼看完所有阻断项。 | 临时违例；**退出计划**：当 readiness 项 ≥ 15 时，再拆成 `readiness/checks.py`（探测）+ `readiness/messages.py`（文案）+ `readiness/runner.py`（编排）；登记日期 2026-05-05。 |
@@ -349,7 +354,7 @@ README.md                                  # 含 SC-011 监管严格场景免责
 
 1. US1 生产实现前产出 `perf-report.md` 首版，对行 1 / 2 / 3 给出实测数据
 2. 若实测命中违例，发布必须阻断；PR 描述中必须显式声明"宪章修订流程触发"、"服务栈替换"或"模型降档"中的具体处置
-3. 行 4 的 Edge-TTS 接口可用性在每周 CI 中通过一次"金丝雀"调用验证，连续失败 ≥ 3 次自动开 issue
+3. 行 4 已由 Piper 替换关闭；若用户显式启用 Edge-TTS 降级路径，仍需在对应 perf-report 段单独记录其首字节延迟与非官方接口风险
 4. 行 5 / 6 / 7 的文件长度违例不得阻塞 V1 实现期推进，但**合入 main 之前**必须按各自退出计划拆分到 ≤ 300 行；任何使这三个文件继续增长的 PR 必须在 PR 描述中显式重申本表对应行的退出计划，不得静默扩张
 
 ---

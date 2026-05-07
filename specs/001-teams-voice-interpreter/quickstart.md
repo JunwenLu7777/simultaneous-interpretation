@@ -16,7 +16,7 @@
 | 硬件 | Apple Silicon Mac 优先；Intel x86_64 兼容但性能受限 |
 | Python | 3.11 或更高 |
 | Homebrew | 已安装（[brew.sh](https://brew.sh/)） |
-| 网络 | 可访问 `api.deepseek.com` 和 `speech.platform.bing.com`（Edge-TTS） |
+| 网络 | 可访问 `api.deepseek.com`；首次下载 Piper voice 模型时可访问 Hugging Face |
 | Microsoft Teams 桌面端 | 已安装 + 账号已登录 |
 | DeepSeek API Key | 在 [platform.deepseek.com](https://platform.deepseek.com/) 注册并领取 |
 | 内置麦克风 | 已可用（系统设置 → 隐私与安全性 → 麦克风可见） |
@@ -38,14 +38,25 @@ source .venv/bin/activate
 # 3) 安装本系统及依赖
 pip install -e .
 
-# 4) 安装 BlackHole 2ch（虚拟音频驱动；首次必须）
+# 4) 下载 Piper 默认 voice 模型（首次必须）
+mkdir -p ~/.cache/teams-voice-interpreter/piper-models
+curl -L -o ~/.cache/teams-voice-interpreter/piper-models/en_US-amy-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
+curl -L -o ~/.cache/teams-voice-interpreter/piper-models/en_US-amy-medium.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+curl -L -o ~/.cache/teams-voice-interpreter/piper-models/zh_CN-huayan-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/zh/zh_CN/huayan/medium/zh_CN-huayan-medium.onnx
+curl -L -o ~/.cache/teams-voice-interpreter/piper-models/zh_CN-huayan-medium.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/zh/zh_CN/huayan/medium/zh_CN-huayan-medium.onnx.json
+
+# 5) 安装 BlackHole 2ch（虚拟音频驱动；首次必须）
 brew install blackhole-2ch
 
-# 5) 重启 macOS（让 BlackHole 驱动注册）
+# 6) 重启 macOS（让 BlackHole 驱动注册）
 sudo shutdown -r now
 ```
 
-> 💡 安装完 BlackHole 必须重启一次 macOS。重启后回到本目录继续。
+> 💡 安装完 BlackHole 必须重启一次 macOS。重启后回到本目录继续。Piper 模型默认放在 `~/.cache/teams-voice-interpreter/piper-models`；如果要换目录，请在 `config.toml` 设置 `piper_models_dir`。
 
 ---
 
@@ -142,7 +153,27 @@ echo 'DEEPSEEK_API_KEY=sk-xxxxx' > .env
 
 向导通过一次轻量 ping 调用 DeepSeek API 验证凭证。
 
-### 步骤 (f)（可选）配置专有名词术语表
+### 步骤 (f) 下载并校验 Piper voice 模型
+
+v1 默认使用本地 Piper TTS，不再把 Edge-TTS 作为生产默认路径。向导会检查：
+
+1. `piper-tts` 包是否可 import
+2. `onnxruntime` 是否可 import
+3. `piper_models_dir` 下是否存在以下 4 个文件：
+   - `en_US-amy-medium.onnx`
+   - `en_US-amy-medium.onnx.json`
+   - `zh_CN-huayan-medium.onnx`
+   - `zh_CN-huayan-medium.onnx.json`
+
+如果上面文件缺失，请按「安装」段的 `curl` 命令下载。临时想使用旧路径时，可在 `config.toml` 显式设置：
+
+```toml
+tts_engine = "edge_tts"
+```
+
+但 Edge-TTS 是降级路径，首字节延迟通常显著高于 Piper，不应作为生产默认同传路径。
+
+### 步骤 (g)（可选）配置专有名词术语表
 
 向导提示你在 `~/.config/teams-voice-interpreter/glossary.toml` 中维护专有名词中英对照（FR-012）：
 
@@ -164,7 +195,7 @@ en = "Foxit"
 
 最多 200 条。空文件或缺失文件 → 不报错，仅依赖 LLM 默认能力。
 
-### 步骤 (g) 阅读监管严格场景免责声明
+### 步骤 (h) 阅读监管严格场景免责声明
 
 向导显示完整 SC-011 免责声明文本，**必须勾选「我已阅读并同意」+ 时间戳**才能完成向导。未确认时无法启动同传会话。
 
@@ -196,8 +227,8 @@ tvi listen --target default --direction uplink --chunks 3
 ```
 
 `tvi say` 会把输入文字翻译并播入上行虚拟设备；`tvi ptt` 会先录制默认麦克风、
-用 Whisper 做一次性识别，再复用同一条 DeepSeek HTTP streaming、Edge-TTS live、
-macOS `afconvert` 解码和 sounddevice 写出路径。Teams 麦克风选中上行虚拟设备
+用 Whisper 做一次性识别，再复用同一条 DeepSeek HTTP streaming、Piper 本地 TTS、
+PCM 解码 / 重采样和 sounddevice 写出路径。Teams 麦克风选中上行虚拟设备
 后，远端应能听到英文译音。`tvi listen` 用于验证连续分段、ASR 准确率和 TTS 输出。
 
 本机校准通过后，另开一个终端执行真实双向监听：
@@ -208,8 +239,8 @@ tvi duplex
 
 `tvi duplex` 同时启动两条真实管线：
 
-- 上行：默认麦克风中文 → Whisper zh → DeepSeek 中译英 → Edge-TTS 英文 → 上行虚拟设备
-- 下行：下行虚拟设备英文 → Whisper en → DeepSeek 英译中 → Edge-TTS 中文 → 默认输出
+- 上行：默认麦克风中文 → Whisper zh → DeepSeek 中译英 → Piper 英文 voice → 上行虚拟设备
+- 下行：下行虚拟设备英文 → Whisper en → DeepSeek 英译中 → Piper 中文 voice → 默认输出
 
 如果上行输出和下行输入是同一个 CoreAudio 设备，CLI 默认拒绝启动，避免把本机译音重新送回识别链路。
 
@@ -218,10 +249,10 @@ tvi duplex
 - 当前会话状态与运行时长
 - 双向最近一段识别原文与译文
 - 首段译音延迟 / 端到端延迟（滚动 p50/p95）
-- DeepSeek / Whisper / Edge-TTS 三服务连接健康状态
+- DeepSeek / Whisper / Piper（或显式 Edge-TTS 降级路径）三类服务 / 引擎健康状态
 - 「开始 / 暂停 / 继续 / 停止 / 导出」按钮
 
-首次访问会请求**浏览器原生通知权限**（用于会议中异常告警），建议同意。
+v1 不请求浏览器原生通知权限；异常告警通过 Web 控制台页内 Toast、标签标题和 favicon 状态提示。
 
 ### 方式 2：仅 CLI
 
@@ -310,9 +341,13 @@ whisper = "tiny"      # 从 small-q5_0 降到 tiny（约 200 MB RAM）
 
 注意 tiny 普通话识别质量明显下降。
 
+### Piper voice 模型缺失
+
+`tvi doctor` / `tvi wizard` 报「缺少 Piper voice 模型」时，重新执行安装段中的 4 条 `curl` 命令，或把模型下载到你在 `config.toml` 中配置的 `piper_models_dir`。
+
 ### Edge-TTS 持续 401 / 403
 
-社区接口被微软封禁的风险。临时解决：
+仅当你显式配置 `tts_engine = "edge_tts"` 时才会走该路径。社区接口被微软封禁的风险。临时解决：
 
 - 等几小时再试（通常社区会快速更新 token）
 - 升级 `edge-tts` 包（`pip install -U edge-tts`）

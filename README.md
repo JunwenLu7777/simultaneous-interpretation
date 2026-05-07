@@ -1,8 +1,8 @@
 # Teams 实时双向语音同传桥
 
 本项目实现 macOS 上的 Microsoft Teams / 钉钉双向中英实时语音同传桥。v1 使用
-BlackHole、Whisper.cpp、DeepSeek streaming、Edge-TTS 与 PyAV 流式解码组成低成本同传
-管线，并提供 CLI 与本地 Web 控制台。
+BlackHole、Whisper.cpp、DeepSeek streaming、Piper 本地 TTS 与 PCM 流式解码组成低成本同传
+管线，并提供 CLI 与本地 Web 控制台。Edge-TTS 仅作为 `tts_engine = "edge_tts"` 显式降级路径保留。
 
 当前真实会议入口是 `tvi duplex`。`tvi start` 保留为早期会话管理路径，不作为当前真测入口。
 
@@ -16,6 +16,8 @@ uv sync --extra dev
 scripts/install-blackhole.sh
 cp config.example.toml config.toml
 $EDITOR config.toml
+mkdir -p ~/.cache/teams-voice-interpreter/piper-models
+# 下载 en_US-amy-medium 与 zh_CN-huayan-medium 两个 Piper voice 文件，详见 quickstart
 tvi doctor --mode realtime --confirm-teams-route
 tvi say --target default "Hello world"
 tvi say --target blackhole "你好"
@@ -28,7 +30,7 @@ Web 控制台默认绑定 `http://127.0.0.1:8765`。
 `DEEPSEEK_API_KEY` 环境变量，环境变量优先级更高。
 
 `tvi doctor --mode realtime` 是进入会议前的硬门禁：设备、凭证、会议软件路由、
-Edge-TTS、PyAV 解码和音频写出任一项未过，都会以非 0 退出。`tvi listen` 用于单向本地校准，
+Piper 模型 / onnxruntime、音频解码和写出任一项未过，都会以非 0 退出。`tvi listen` 用于单向本地校准，
 `tvi duplex` 用于真实双向：默认麦克风中文上行到上行虚拟设备，会议软件扬声器英文从下行
 虚拟设备进入程序，再把中文译音写到默认输出。正式会议必须使用两路不同虚拟设备，避免回灌。
 
@@ -117,7 +119,7 @@ tvi listen --online-asr --target default --direction uplink --chunks 3
 
 ### 短句发声测试：`tvi say`
 
-用于验证 DeepSeek -> Edge-TTS -> 音频输出是否可用。它不走实时丢弃/截断策略，会完整播放。
+用于验证 DeepSeek -> Piper TTS（或显式 Edge-TTS 降级）-> 音频输出是否可用。它不走实时丢弃/截断策略，会完整播放。
 
 ```bash
 tvi say --target default "Hello world"
@@ -248,7 +250,7 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 - 入队前默认不主动丢弃旧 burst，避免长句分片被误判成新 burst 后丢失。
 - 播放队列默认不使用 3 段小队列阻塞 ASR worker；积压达到 3 段时会明确提示「内容会保留，但端到端延迟正在升高」。
 - 默认不启用 stale 播放跳过；低延迟实验若显式开启 stale 窗口，也不得用于长句切割后的同一语流。
-- 实时 Edge-TTS 首音频超时为 3 秒，总合成超时为 8 秒；`tts.no_audio` 短文本/网络抖动保留一次轻量重试，仍失败或非可恢复错误时丢弃该段并继续后续内容。
+- 实时 TTS 首音频超时为 3 秒，总合成超时为 8 秒；Piper / Edge-TTS 的 `tts.no_audio` 或可恢复合成错误保留一次轻量重试，仍失败或非可恢复错误时丢弃该段并继续后续内容。
 - `tvi say` / `play_prepared` 保持完整播放和原重试契约，用于非实时测试。
 
 截至 2026-05-05 钉钉真测，最新下行 5 段首字节约为：
@@ -260,7 +262,7 @@ Teams / 钉钉真测入口。真实会议请使用 `tvi duplex`。
 队列积压已基本消除，但 P1 目标 `≤ 1.5s` 尚未稳定达成。剩余主要瓶颈是：
 
 - ASR 仍是 VAD 收段后的整段 Whisper.cpp 识别，常见 1.25-2.30 秒。
-- Edge-TTS 首写常见 1.6-2.0 秒。
+- Piper 首字节真测约 102-107 ms；Edge-TTS 降级路径常见 1.6-2.0 秒首写，不作为生产默认路径。
 - 已新增 LocalAgreement 稳定增量边界和 `--online-asr` 实验入口：累计全文、增量 `delta_text` 与 final 修正标记分离；真实 pywhispercpp `new_segment_callback` 在 one-shot 模式下接近 final 时才触发，因此默认 `listen` / `duplex` 路径仍是 VAD 收段 + 6 秒兜底强制切段 + overlap 保守去重。
 - 当前 `--online-asr` 通过高频重跑本地 Whisper one-shot 模拟 partial。默认不会让 partial 提前调用 MT/TTS，避免未确认文本消耗外部调用；只有显式加 `--online-asr-early-prepare --low-latency-proof <path>` 且 proof 通过复核，才会启用提前准备。
 - 探针会按「final 可确认的可翻译 stable partial」判定真实收益，并把实时音频到达下界计入 partial 时间；若该指标为 `n/a`，说明提前准备的 partial 会被 final 修正取消，实际不会降低首段播出延迟。

@@ -19,14 +19,21 @@ from teams_voice_interpreter.audio.playback import (
     StreamingSoundDeviceAudioSink,
 )
 from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
-from teams_voice_interpreter.config import load_settings
+from teams_voice_interpreter.config import Settings, load_settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
-from teams_voice_interpreter.errors import DeepSeekError, EdgeTTSError, UserFacingError
+from teams_voice_interpreter.errors import (
+    DeepSeekError,
+    EdgeTTSError,
+    PiperTTSError,
+    UserFacingError,
+)
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient, TranslationChunk
 from teams_voice_interpreter.tts.audio_decode import (
-    decode_mp3_bytes_to_pcm16,
+    decode_mp3_stream_to_pcm16,
+    decode_pcm_stream_to_pcm16,
 )
-from teams_voice_interpreter.tts.edge_tts_client import EdgeTTSClient, TTSEvent
+from teams_voice_interpreter.tts.edge_tts_client import TTSEvent
+from teams_voice_interpreter.tts.factory import build_tts_client
 from teams_voice_interpreter.tts.streaming import start_pcm_stream_with_retry
 
 Int16Array = npt.NDArray[np.int16]
@@ -34,6 +41,7 @@ _RETRIABLE_TTS_ERROR_CODES = {
     "tts.no_audio",
     "tts.first_byte_timeout",
     "tts.synthesis_timeout",
+    "tts.piper_synthesize_failed",
 }
 REALTIME_TTS_FIRST_BYTE_TIMEOUT_S = 3.0
 REALTIME_TTS_SYNTHESIS_TIMEOUT_S = 8.0
@@ -197,11 +205,10 @@ class LiveSayBridge:
         audio_events = await self._synthesize_with_retry(
             target_text=target_text,
             direction=direction,
-            rate=settings.tts_rate,
+            settings=settings,
         )
-        mp3_bytes = b"".join(event.audio_chunk for event in audio_events)
         tts_completed_at = time.perf_counter()
-        pcm = decode_mp3_bytes_to_pcm16(mp3_bytes)
+        pcm = await _decode_tts_events_to_pcm16(audio_events)
         decoded_at = time.perf_counter()
         return PreparedSayResult(
             source_text=source_text,
@@ -220,33 +227,32 @@ class LiveSayBridge:
         *,
         target_text: str,
         direction: AudioDirection,
-        rate: str,
+        settings: Settings,
         max_retries: int = 1,
     ) -> list[TTSEvent]:
-        """调 Edge-TTS；遇到 `tts.no_audio` 短文本/网络抖动时延迟一次重试。
+        """按配置选择 TTS backend；遇到可恢复错误时延迟一次重试。
 
-        Edge-TTS 对 ≤ 8 字短句和高频连续请求会偶发返回空音频，重试一次通常可恢复；
-        若仍失败则带上译文预览原样抛 `EdgeTTSError`，供调用方按 `_prepare_listen_segment`
+        Edge-TTS 对 ≤ 8 字短句和高频连续请求会偶发返回空音频，Piper 也可能遇到
+        ONNX runtime / IO 暂时性错误；重试一次通常可恢复。
+        若仍失败则带上译文预览原样抛同类 TTS 错误，供调用方按 `_prepare_listen_segment`
         的两段式打印丢弃该段，避免该段在 prepare 阶段直接撕掉整个 worker。
         """
-        last_error: EdgeTTSError | None = None
+        last_error: EdgeTTSError | PiperTTSError | None = None
         for attempt in range(max_retries + 1):
             try:
+                client = build_tts_client(settings)
                 return [
                     event
-                    async for event in EdgeTTSClient(
-                        live=True,
-                        rate=rate,
-                    ).stream_synthesize(target_text, direction=direction)
+                    async for event in client.stream_synthesize(target_text, direction=direction)
                     if event.audio_chunk
                 ]
-            except EdgeTTSError as error:
+            except (EdgeTTSError, PiperTTSError) as error:
                 last_error = error
                 if error.code not in _RETRIABLE_TTS_ERROR_CODES or attempt >= max_retries:
                     break
                 await asyncio.sleep(0.3 * (attempt + 1))
         assert last_error is not None
-        raise EdgeTTSError(
+        raise type(last_error)(
             code=last_error.code,
             what_happened=(
                 f"{last_error.what_happened} 译文预览：{_preview_text(target_text)}"
@@ -357,6 +363,43 @@ def _preview_text(text: str, *, max_length: int = 80) -> str:
     if len(compact) <= max_length:
         return compact
     return f"{compact[:max_length]}..."
+
+
+async def _decode_tts_events_to_pcm16(events: list[TTSEvent]) -> Int16Array:
+    """把任意 backend 的 TTS events 解码成 live_say 的 16 kHz PCM。"""
+    audio_events = [event for event in events if event.audio_chunk]
+    if not audio_events:
+        return np.array([], dtype=np.int16)
+
+    async def audio_chunks() -> AsyncIterator[bytes]:
+        for event in audio_events:
+            yield event.audio_chunk
+
+    audio_format = audio_events[0].audio_format
+    if audio_format == "mp3":
+        pcm_chunks = [chunk async for chunk in decode_mp3_stream_to_pcm16(audio_chunks())]
+    elif audio_format.startswith("pcm_s16le_"):
+        source_rate = int(audio_format.removeprefix("pcm_s16le_"))
+        pcm_chunks = [
+            chunk
+            async for chunk in decode_pcm_stream_to_pcm16(
+                audio_chunks(),
+                source_sample_rate_hz=source_rate,
+            )
+        ]
+    else:
+        raise UserFacingError(
+            code="tts.unsupported_audio_format",
+            what_happened=f"发生了什么：未知 TTS audio_format `{audio_format}`。",
+            next_action=(
+                "下一步如何做：检查 TTS backend 是否声明了正确的 audio_format；"
+                "当前支持 `mp3` 与 `pcm_s16le_<sample_rate>`。"
+            ),
+        )
+
+    if not pcm_chunks:
+        return np.array([], dtype=np.int16)
+    return np.concatenate(pcm_chunks).astype(np.int16)
 
 
 def _max_playback_samples(max_playback_seconds: float | None) -> int | None:

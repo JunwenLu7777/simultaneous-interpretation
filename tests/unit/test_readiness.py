@@ -374,6 +374,62 @@ def test_readiness_reports_pyav_unavailable(monkeypatch) -> None:  # type: ignor
     assert "uv sync" in report.by_key["pyav"].next_action
 
 
+def test_readiness_piper_default_fails_when_models_missing(  # type: ignore[no-untyped-def]
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """真实 wizard/doctor 路径默认 Piper 时，缺模型必须阻断并提示下载。"""
+
+    monkeypatch.setattr(
+        readiness_mod.importlib.util,
+        "find_spec",
+        lambda name: object() if name in {"piper", "onnxruntime"} else None,
+    )
+
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        vad_backend="webrtc",
+        tts_engine="piper",
+        piper_models_dir=tmp_path,
+    ).run()
+
+    assert not report.is_ready
+    assert report.by_key["piper_models"].status is CheckStatus.FAIL
+    assert "缺少 Piper voice 模型" in report.by_key["piper_models"].detail
+    assert "huggingface.co/rhasspy/piper-voices" in report.by_key["piper_models"].next_action
+
+
+def test_readiness_piper_default_passes_when_dependencies_and_models_exist(  # type: ignore[no-untyped-def]
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Piper 依赖和默认 voice 文件齐全时，真实 readiness 检查应放行 TTS 项。"""
+
+    monkeypatch.setattr(
+        readiness_mod.importlib.util,
+        "find_spec",
+        lambda name: object() if name in {"piper", "onnxruntime"} else None,
+    )
+    for voice in ("en_US-amy-medium", "zh_CN-huayan-medium"):
+        (tmp_path / f"{voice}.onnx").write_bytes(b"model")
+        (tmp_path / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+
+    report = ReadinessChecker(
+        device_probe=PassingProbe(),
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+        teams_route_confirmed=True,
+        mode="phrase",
+        vad_backend="webrtc",
+        tts_engine="piper",
+        piper_models_dir=tmp_path,
+    ).run()
+
+    assert report.by_key["piper_models"].status is CheckStatus.PASS
+
+
 def test_readiness_silero_check_skipped_for_webrtc_backend(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """vad_backend=webrtc 时 silero 检查必须跳过为 PASS。"""
     report = ReadinessChecker(

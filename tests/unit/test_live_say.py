@@ -10,8 +10,9 @@ import pytest
 
 from teams_voice_interpreter import live_say
 from teams_voice_interpreter.audio.routing import AudioDevice
+from teams_voice_interpreter.config import Settings
 from teams_voice_interpreter.data.audio_segment import AudioDirection
-from teams_voice_interpreter.errors import EdgeTTSError
+from teams_voice_interpreter.errors import EdgeTTSError, PiperTTSError
 from teams_voice_interpreter.live_say import (
     LiveSayBridge,
     PreparedSayResult,
@@ -41,25 +42,24 @@ def test_preview_text_compacts_and_truncates_long_text() -> None:
     assert text == "Hello world xxxxxxxx..."
 
 
-class _FakeEdgeTTSClient:
-    """按 attempt 序列依次返回 EdgeTTSError 或音频事件的桩。"""
+class _FakeTTSClient:
+    """按 attempt 序列依次返回 TTS 错误或音频事件的桩。"""
 
-    instances: list[_FakeEdgeTTSClient] = []
+    instances: list[_FakeTTSClient] = []
 
     def __init__(
         self,
-        outcomes: list[list[TTSEvent] | EdgeTTSError],
+        outcomes: list[list[TTSEvent] | EdgeTTSError | PiperTTSError],
         *,
-        live: bool = False,
-        rate: str = "+0%",
+        settings: Settings | None = None,
     ) -> None:
-        del live, rate
+        del settings
         self._outcomes = outcomes
         type(self).instances.append(self)
 
-    def _next_outcome(self) -> list[TTSEvent] | EdgeTTSError:
+    def _next_outcome(self) -> list[TTSEvent] | EdgeTTSError | PiperTTSError:
         if not self._outcomes:
-            msg = "FakeEdgeTTSClient outcomes exhausted"
+            msg = "FakeTTSClient outcomes exhausted"
             raise AssertionError(msg)
         return self._outcomes.pop(0)
 
@@ -71,7 +71,7 @@ class _FakeEdgeTTSClient:
     ) -> AsyncIterator[TTSEvent]:
         del text, direction
         outcome = self._next_outcome()
-        if isinstance(outcome, EdgeTTSError):
+        if isinstance(outcome, EdgeTTSError | PiperTTSError):
             raise outcome
         for event in outcome:
             yield event
@@ -87,7 +87,7 @@ def test_synthesize_with_retry_recovers_from_retryable_tts_errors(  # type: igno
 ) -> None:
     """Edge-TTS 可恢复错误重试一次应当恢复，不能直接抛错丢段。"""
     success_chunks = [TTSEvent(kind="audio_chunk", audio_chunk=b"mp3-bytes")]
-    outcomes: list[list[TTSEvent] | EdgeTTSError] = [
+    outcomes: list[list[TTSEvent] | EdgeTTSError | PiperTTSError] = [
         EdgeTTSError(
             code=error_code,
             what_happened="发生了什么：Edge-TTS 未返回音频数据。",
@@ -96,26 +96,27 @@ def test_synthesize_with_retry_recovers_from_retryable_tts_errors(  # type: igno
         success_chunks,
     ]
 
-    factory_calls: list[tuple[bool, str]] = []
+    factory_calls: list[Settings] = []
 
-    def factory(*, live: bool, rate: str) -> _FakeEdgeTTSClient:
-        factory_calls.append((live, rate))
-        return _FakeEdgeTTSClient(outcomes, live=live, rate=rate)
+    def factory(settings: Settings) -> _FakeTTSClient:
+        factory_calls.append(settings)
+        return _FakeTTSClient(outcomes, settings=settings)
 
-    monkeypatch.setattr(live_say, "EdgeTTSClient", factory)
+    monkeypatch.setattr(live_say, "build_tts_client", factory)
 
     bridge = LiveSayBridge.__new__(LiveSayBridge)
+    settings = Settings(tts_engine="edge_tts", tts_rate="+0%")
     events = asyncio.run(
         bridge._synthesize_with_retry(
             target_text="你好",
             direction=AudioDirection.UPLINK,
-            rate="+0%",
+            settings=settings,
         )
     )
 
     assert events == success_chunks
     assert len(factory_calls) == 2
-    assert all(call == (True, "+0%") for call in factory_calls)
+    assert all(call is settings for call in factory_calls)
 
 
 def test_synthesize_with_retry_propagates_after_exhausted_retries(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -125,12 +126,12 @@ def test_synthesize_with_retry_propagates_after_exhausted_retries(monkeypatch) -
         what_happened="发生了什么：Edge-TTS 未返回音频数据。",
         next_action="下一步如何做：请重试一次。",
     )
-    outcomes: list[list[TTSEvent] | EdgeTTSError] = [error, error]
+    outcomes: list[list[TTSEvent] | EdgeTTSError | PiperTTSError] = [error, error]
 
     monkeypatch.setattr(
         live_say,
-        "EdgeTTSClient",
-        lambda *, live=False, rate="+0%": _FakeEdgeTTSClient(outcomes, live=live, rate=rate),
+        "build_tts_client",
+        lambda settings: _FakeTTSClient(outcomes, settings=settings),
     )
 
     bridge = LiveSayBridge.__new__(LiveSayBridge)
@@ -139,7 +140,7 @@ def test_synthesize_with_retry_propagates_after_exhausted_retries(monkeypatch) -
             bridge._synthesize_with_retry(
                 target_text="你好",
                 direction=AudioDirection.UPLINK,
-                rate="+0%",
+                settings=Settings(tts_engine="edge_tts", tts_rate="+0%"),
             )
         )
 
@@ -155,28 +156,77 @@ def test_synthesize_with_retry_does_not_retry_on_other_errors(monkeypatch) -> No
         what_happened="发生了什么：音色不存在。",
         next_action="下一步如何做：请检查音色名称。",
     )
-    outcomes: list[list[TTSEvent] | EdgeTTSError] = [error]
+    outcomes: list[list[TTSEvent] | EdgeTTSError | PiperTTSError] = [error]
 
-    factory_calls: list[bool] = []
+    factory_calls: list[Settings] = []
 
-    def factory(*, live: bool, rate: str) -> _FakeEdgeTTSClient:
-        factory_calls.append(live)
-        return _FakeEdgeTTSClient(outcomes, live=live, rate=rate)
+    def factory(settings: Settings) -> _FakeTTSClient:
+        factory_calls.append(settings)
+        return _FakeTTSClient(outcomes, settings=settings)
 
-    monkeypatch.setattr(live_say, "EdgeTTSClient", factory)
+    monkeypatch.setattr(live_say, "build_tts_client", factory)
 
     bridge = LiveSayBridge.__new__(LiveSayBridge)
+    settings = Settings(tts_engine="edge_tts", tts_rate="+0%")
     with pytest.raises(EdgeTTSError) as exc_info:
         asyncio.run(
             bridge._synthesize_with_retry(
                 target_text="你好",
                 direction=AudioDirection.UPLINK,
-                rate="+0%",
+                settings=settings,
             )
         )
 
     assert exc_info.value.code == "tts.voice_unknown"
     assert len(factory_calls) == 1
+
+
+def test_synthesize_with_retry_preserves_piper_error_type(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Piper 默认路径失败时必须保留 PiperTTSError 类型，便于调用方区分模型问题。"""
+    error = PiperTTSError(
+        code="tts.piper_synthesize_failed",
+        what_happened="发生了什么：Piper 合成失败。",
+        next_action="下一步如何做：请重新下载模型。",
+    )
+    outcomes: list[list[TTSEvent] | EdgeTTSError | PiperTTSError] = [error, error]
+    monkeypatch.setattr(
+        live_say,
+        "build_tts_client",
+        lambda settings: _FakeTTSClient(outcomes, settings=settings),
+    )
+
+    bridge = LiveSayBridge.__new__(LiveSayBridge)
+    with pytest.raises(PiperTTSError) as exc_info:
+        asyncio.run(
+            bridge._synthesize_with_retry(
+                target_text="你好",
+                direction=AudioDirection.UPLINK,
+                settings=Settings(tts_engine="piper"),
+            )
+        )
+
+    assert exc_info.value.code == "tts.piper_synthesize_failed"
+    assert "重试 1 次后仍失败" in exc_info.value.what_happened
+
+
+def test_decode_tts_events_handles_piper_pcm_chunks() -> None:
+    """非 streaming 的 say/ptt 路径必须能解码 Piper raw PCM。"""
+    events = [
+        TTSEvent(
+            kind="first_byte",
+            audio_chunk=np.array([1, 2], dtype="<i2").tobytes(),
+            audio_format="pcm_s16le_16000",
+        ),
+        TTSEvent(
+            kind="audio_chunk",
+            audio_chunk=np.array([3], dtype="<i2").tobytes(),
+            audio_format="pcm_s16le_16000",
+        ),
+    ]
+
+    pcm = asyncio.run(live_say._decode_tts_events_to_pcm16(events))
+
+    assert pcm.tolist() == [1, 2, 3]
 
 
 def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  # type: ignore[no-untyped-def]

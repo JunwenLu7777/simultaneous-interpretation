@@ -2,8 +2,8 @@
 
 **日期**：2026-05-05
 **Git commit**：当前 HEAD；本报告不内嵌自引用提交哈希，使用 `git log -1 --oneline` 核验
-**硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Edge-TTS 外网基准待发布前复跑
-**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已完成 BM-4 / BM-6 真实化、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 真实首字节 p50 566-598 ms 超原 400 ms 预算**；**BM-6 真实首字节 p50 789-815 ms 超 400 ms 预算 ~100%、p95 941-1049 ms 超 800 ms 预算 ~31%（双双 Fail）**；C+α 测得整段 ASR ≤ 310 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**2026-05-07 宪章修订 PR (709ea05) 已合并**：SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms（硬）+ ≤ 1000 ms（软），p95 从 ≤ 1.5 s 调整为 ≤ 2000 ms，对齐 BM-4 实测物理下限。**但 BM-6 真实化又推翻这一对齐**：累加 ASR 297 ms + MT 566 ms + TTS 789 ms + ROUTE ~50 ms ≈ **1702 ms**，超新 SC-001 ≤ 1200 ms 硬阈值 ~500 ms，并已触发 spec.md SC-001「> 1500 ms 二次修订触发阈值」。**下一程必须**从 (a) 服务栈替换（换 TTS） / (b) 二次宪章修订 / (c) 重新评估 v1 范围 三选一启动；本数据使继续推进 v1 实现期门禁条件不成立。详见「Edge-TTS first byte 真实化（BM-6）」段。
+**硬件**：本地模拟基准；真实 BlackHole / Whisper 模型 / Piper 默认路径基准待发布前复跑
+**总体结论**：14 项 BM（BM-1..13 + BM-10D）的"模拟基准下通过"为 stub 占位状态；2026-05-07 已完成 BM-4 / BM-6 真实化、对 BM-10 链路中的 ASR 子段完成 C+α 实测（**BM-10 端到端首段本身仍是 stub**，未真实化），详见后文专题段。其中 **BM-4 真实首字节 p50 566-598 ms 超原 400 ms 预算**；Edge-TTS 版 BM-6 曾测得 p50 789-815 ms / p95 941-1049 ms，导致端到端约 1702-1733 ms 并触发服务栈替换。随后 Piper 对比探针确认默认 TTS 可降至 p50 103-107 ms / p95 ≈ 197 ms，生产默认路径已改为 Piper，BM-6 子预算同步收紧为 p50 ≤ 200 ms / p95 ≤ 400 ms。C+α 测得整段 ASR ≤ 310 ms（仅 ASR 子段，不能直接判定 BM-10 整体 Pass / Fail）。其余 BM 的真测状态需逐一审计 `tests/perf/test_*.py`。`--online-asr` 实验路径不计入下表通过项；2026-05-06 上行与 2026-05-07 下行本机探针均显示该路径尚未产生可交付的低延迟收益，详见「Online ASR 实验探针」。**2026-05-07 宪章修订 PR (709ea05) 已合并**：SC-001 / SC-002 中位阈值从 ≤ 800 ms 调整为 ≤ 1200 ms（硬）+ ≤ 1000 ms（软），p95 从 ≤ 1.5 s 调整为 ≤ 2000 ms；Piper 默认路径的子段估算为 ASR 297 ms + MT 566 ms + TTS 103 ms + ROUTE ~50 ms ≈ **1016 ms**，显示该服务栈有望进入硬阈值并接近软目标。**端到端门禁仍必须以 BM-10 / BM-10D 真机复跑为准**，当前不得把子段估算声明为 SC-001 / SC-002 已 Pass。详见「TTS 引擎对比与 Piper 决策」段。
 
 | BM | 关联条款 | 当前结果 | 预算 | Pass/Fail | exit_action |
 |----|----------|----------|------|-----------|-------------|
@@ -12,12 +12,12 @@
 | BM-3 | SC-010 / 宪章 IV | CPU 24% | ≤ 30% | Pass | 无 |
 | BM-4 | 宪章 IV | MT first token p50 598 ms / p95 753 ms（2026-05-07 真实化，上下行最差值；上行 p50 566 / 下行 p50 598） | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50)** | 重审 SC-001 阈值或换 MT 服务栈，详见「DeepSeek MT first token 真实化（BM-4）」 |
 | BM-5 | SC-005 / FR-012 | 保真 96% / 术语延迟增量 120 ms | ≥ 95% / ≤ 200 ms | Pass | 无 |
-| BM-6 | SC-001 / SC-002 | TTS first byte p50 815 ms / p95 1049 ms（2026-05-07 真实化，上下行最差值；上行 p50 789 / 下行 p50 815） | p50 ≤ 400 ms / p95 ≤ 800 ms | **Fail (p50, p95)** | 服务栈替换或触发 SC-001 二次修订（实测累加超 1500 ms 二次修订阈值，详见「Edge-TTS first byte 真实化（BM-6）」） |
+| BM-6 | SC-001 / SC-002 | Piper TTS first byte p50 107 ms / p95 197 ms（2026-05-07 真实化，上下行最差值；上行 p50 103 / 下行 p50 107） | p50 ≤ 200 ms / p95 ≤ 400 ms | Pass | 生产默认 TTS 已由 Edge-TTS 替换为 Piper；Edge-TTS 历史基线见后文 |
 | BM-7 | Edge-TTS 稳定性 | 401/403 失败率 0.1% | < 0.5% | Pass | 无 |
 | BM-8 | AUDIO_ROUTE | BlackHole 路由 p95 18 ms | ≤ 50 ms | Pass | 无 |
 | BM-9 | SC-002 | Aggregate jitter p95 8 ms | ≤ 10 ms | Pass | 无 |
-| BM-10 | SC-001 | 上行首段 p50 600 ms / p95 1100 ms（**stub，待真实化**） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | Pass (stub) | 真实化时按新阈值断言 |
-| BM-10D | SC-002 | 下行首段 p50 700 ms（**stub，待真实化**） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | Pass (stub) | 真实化时按新阈值断言 |
+| BM-10 | SC-001 | 上行首段 p50 600 ms / p95 1100 ms（**stub，待真实化**） | p50 ≤ 1200 ms（硬）/ ≤ 1000 ms（软）/ p95 ≤ 2000 ms（2026-05-07 宪章修订 PR 自 800 ms / 1.5 s 调整） | 未判定（stub） | 必须用 Piper 默认生产路径真实化后再判定 |
+| BM-10D | SC-002 | 下行首段 p50 700 ms（**stub，待真实化**） | 同 SC-001（2026-05-07 宪章修订 PR 调整） | 未判定（stub） | 必须用 Piper 默认生产路径真实化后再判定 |
 | BM-11 | SC-003 | 整段 p50 1800 ms / p95 3200 ms | p50 ≤ 2.5 s / p95 ≤ 4.0 s | Pass | 无 |
 | BM-12 | SC-004 | 60 分钟用户感知中断 0 次 | = 0 | Pass | 无 |
 | BM-13 | SC-004 / 宪章 IV | 24h 内存增长 2.5% | ≤ 5% | Pass | 无 |
@@ -148,7 +148,7 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 **日期**：2026-05-07
 **目的**：把 BM-6（Edge-TTS first byte 延迟）从主表 stub（p50 260 ms / p95 620 ms 占位）替换为真实测量。补齐 SC-001 / SC-002 端到端首段延迟链路的最后一段。
 **样本**：上行 TTS 输入英文译文 15 句（音色 `en-US-AriaNeural`，对应 zh→en 链路出口）+ 下行 TTS 输入中文译文 15 句（音色 `zh-CN-XiaoxiaoNeural`，对应 en→zh 链路出口），覆盖短 / 中 / 长（5-30 字 / 词），含数字、业务术语、专有名词；30/30 调用全部成功。
-**服务**：Edge-TTS（`speech.platform.bing.com`，社区维护非官方接口），生产管线默认。
+**服务**：Edge-TTS（`speech.platform.bing.com`，社区维护非官方接口），本段为 Piper 替换前的历史生产基线。
 **命令入口**：`uv run --extra dev scripts/measure_edge_tts_first_byte.py --samples-per-direction 15 --proof-json /tmp/edge-tts-first-byte.json`
 **口径**：测量 `EdgeTTSClient(live=True).stream_synthesize(text, direction=...)` 从迭代开始到首个 `kind="first_byte"` event 到达的 wall-clock 耗时；每次调用消费到 `kind="completed"` 才计入下一次。
 
@@ -235,17 +235,17 @@ CER 在两个方向上各自基本一致（上行 0.107 / 下行 0.109），且�
 - transformers 版本耦合（与项目其他升级冲突风险）
 - CPML 商用受限（虽然 v1 是个人自用、暂时合规，但限制未来分发自由）
 
-**下一程**（生产管线集成）：
+**生产管线集成状态**：
 
-1. 创建 `src/teams_voice_interpreter/tts/piper_client.py` 实现 `PiperClient.stream_synthesize` 接口（与 `EdgeTTSClient.stream_synthesize` 兼容签名，方便替换）
-2. 修改 `config.py` 加 `piper_models_dir` 配置项 + `tts_engine: Literal["edge_tts", "piper"]` 切换开关
-3. 修改 `readiness.py` 加 Piper 模型存在性 + onnxruntime 可用性检查
-4. 修改 `cli/wizard.py` 引导用户首次运行时下载 Piper voice 模型
-5. 写 `contracts/piper-tts.md`（替换或并行 `contracts/edge-tts.md`）
-6. 修改 `spec.md` v1 服务栈锁定段（Edge-TTS → Piper）+ 子预算约束（TTS first byte ≤ 200 ms 而不是 ≤ 800 ms）
-7. 修改 `plan.md` 性能目标 / 阶段预算 + 复杂度追踪行 4（Edge-TTS 风险关闭）
-8. 集成测试：上行 / 下行端到端首段延迟在 ≤ 1200 ms 内
-9. 更新 `perf-report.md` 主表 BM-6 行（再做一次基于 Piper 的子预算定义 + 实测）
+1. ✅ 已创建 `src/teams_voice_interpreter/tts/piper_client.py`，实现与 `EdgeTTSClient.stream_synthesize` 兼容的 async 流式接口。
+2. ✅ 已在 `config.py` 增加 `piper_models_dir` 与 `tts_engine: Literal["edge_tts", "piper"]` 切换开关，生产默认值为 `piper`。
+3. ✅ 已在 `readiness.py` 增加 Piper 模型存在性 + `onnxruntime` 可用性检查。
+4. ✅ 已在 `cli/wizard.py` / `quickstart.md` 引导用户首次运行时下载 Piper voice 模型。
+5. ✅ 已新增 `contracts/piper-tts.md`，并保留 `contracts/edge-tts.md` 作为降级路径契约。
+6. ✅ 已修改 `spec.md` v1 服务栈锁定段（Edge-TTS → Piper）+ 子预算约束（TTS first byte p50 ≤ 200 ms / p95 ≤ 400 ms）。
+7. ✅ 已修改 `plan.md` 性能目标 / 阶段预算 + 复杂度追踪行 4（Edge-TTS 风险关闭）。
+8. ⏳ 集成测试仍需在真机上复跑上行 / 下行端到端首段延迟，确认生产路径 ≤ 1200 ms。
+9. ✅ 已更新 `perf-report.md` 主表 BM-6 行为 Piper 子预算与实测。
 
 **最近真测发现的子预算修订需求**：现有 BM-6 子预算（first byte p50 ≤ 400 ms / p95 ≤ 800 ms）按 Edge-TTS 量级设定，对 Piper 显著过宽（实测 p50 100 ms / p95 200 ms）。集成 PR 应一并把 BM-6 子预算调整为「first byte p50 ≤ 200 ms / p95 ≤ 400 ms」以反映 Piper 真实下限。
 

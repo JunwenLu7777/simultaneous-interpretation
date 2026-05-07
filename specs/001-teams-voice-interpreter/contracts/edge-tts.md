@@ -2,11 +2,12 @@
 
 **关联**：[plan.md](../plan.md) · [research.md](../research.md) §3
 **实现位置**：`src/teams_voice_interpreter/tts/edge_tts_client.py`
-**警告**：**Edge-TTS 是非官方接口**（社区维护的 Microsoft Edge 浏览器 TTS 客户端逆向调用），不是 Microsoft Azure 官方付费 API。本契约描述当前 `edge-tts` 7.x 版本行为；任何接口变更均可能让本契约失效，必须有阶段 0 BM-7 监控 + Coqui XTTS-v2 降级路径。
+**状态**：显式降级路径；v1 生产默认 TTS 已切换为 [Piper](piper-tts.md)。  
+**警告**：**Edge-TTS 是非官方接口**（社区维护的 Microsoft Edge 浏览器 TTS 客户端逆向调用），不是 Microsoft Azure 官方付费 API。本契约描述当前 `edge-tts` 7.x 版本行为；任何接口变更均可能让本契约失效。仅当用户配置 `tts_engine = "edge_tts"` 时适用。
 
 ## 1. 适用范围
 
-承担**流式 TTS** 全部职责（FR-009 / FR-010）。v1 双向译音合成均通过本契约。
+承担**Edge-TTS 降级路径**的流式 TTS 职责。v1 双向译音合成默认通过 `contracts/piper-tts.md`；本契约只约束显式启用 `tts_engine = "edge_tts"` 的兼容模式。
 
 ## 2. 客户端
 
