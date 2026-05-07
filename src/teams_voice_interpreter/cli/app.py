@@ -477,6 +477,8 @@ def wizard(
         allow_shared_virtual_device=settings.allow_shared_virtual_device,
         vad_backend=settings.vad_backend,
         silero_vad_model_path=settings.silero_vad_model_path(),
+        tts_engine=settings.tts_engine,
+        piper_models_dir=settings.resolved_piper_models_dir(),
         mode="phrase",
     ).run()
     _print_readiness_report(report)
@@ -525,6 +527,8 @@ def doctor(
         allow_shared_virtual_device=settings.allow_shared_virtual_device,
         vad_backend=settings.vad_backend,
         silero_vad_model_path=settings.silero_vad_model_path(),
+        tts_engine=settings.tts_engine,
+        piper_models_dir=settings.resolved_piper_models_dir(),
         mode=doctor_mode,
         require_low_latency=require_low_latency,
         low_latency_proof=_read_low_latency_proof(low_latency_proof),

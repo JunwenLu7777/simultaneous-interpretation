@@ -21,9 +21,11 @@ from teams_voice_interpreter.audio.routing import AudioDevice, AudioDeviceProbe
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 from teams_voice_interpreter.tts.edge_tts_client import DEFAULT_VOICES, EdgeTTSClient
+from teams_voice_interpreter.tts.piper_client import DEFAULT_PIPER_VOICES
 
 _EXPECTED_SILERO_SHA256 = "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
 _DEFAULT_SILERO_VAD_MODEL_PATH = Path.home() / ".cache/teams-voice-interpreter/vad/silero_vad.onnx"
+_DEFAULT_PIPER_MODELS_DIR = Path.home() / ".cache/teams-voice-interpreter/piper-models"
 
 
 class DeviceProbe(Protocol):
@@ -119,6 +121,10 @@ class ReadinessChecker:
     allow_shared_virtual_device: bool = False
     vad_backend: Literal["silero", "webrtc"] = "silero"
     silero_vad_model_path: Path = _DEFAULT_SILERO_VAD_MODEL_PATH
+    # tts_engine 默认 "edge_tts" 保持现有测试不破；cli/app.py 实例化时
+    # 必须显式传 settings.tts_engine 才能切到生产默认（piper）。
+    tts_engine: Literal["edge_tts", "piper"] = "edge_tts"
+    piper_models_dir: Path = _DEFAULT_PIPER_MODELS_DIR
 
     def run(self) -> ReadinessReport:
         """执行全部阻断性检查。"""
@@ -129,7 +135,7 @@ class ReadinessChecker:
                 self._default_input_check(),
                 self._default_output_check(),
                 self._deepseek_key_check(),
-                self._edge_tts_voice_check(),
+                self._tts_engine_check(),
                 self._afconvert_check(),
                 self._pyav_check(),
                 self._silero_vad_check(),
@@ -273,6 +279,12 @@ class ReadinessChecker:
             )
         return self._pass("deepseek_key", "DeepSeek API Key", _redact_secret(value))
 
+    def _tts_engine_check(self) -> ReadinessCheck:
+        """按 tts_engine 分发到具体引擎检查（key 也对应改变）。"""
+        if self.tts_engine == "piper":
+            return self._piper_models_check()
+        return self._edge_tts_voice_check()
+
     def _edge_tts_voice_check(self) -> ReadinessCheck:
         try:
             client = EdgeTTSClient()
@@ -286,6 +298,51 @@ class ReadinessChecker:
                 error.next_action,
             )
         return self._pass("edge_tts_voice", "Edge-TTS 音色", "默认中英文音色可用")
+
+    def _piper_models_check(self) -> ReadinessCheck:
+        """检查 Piper 推理依赖：piper-tts 包 + onnxruntime + 默认两个 voice 模型存在。"""
+        if importlib.util.find_spec("piper") is None:
+            return self._fail(
+                "piper_models",
+                "Piper TTS",
+                "piper-tts 包未安装",
+                "下一步如何做：请运行 `uv sync --extra dev` 安装依赖后重试。",
+            )
+        if importlib.util.find_spec("onnxruntime") is None:
+            return self._fail(
+                "piper_models",
+                "Piper TTS",
+                "onnxruntime 未安装",
+                "下一步如何做：请运行 `uv sync --extra dev` 安装依赖后重试。",
+            )
+        missing = [
+            voice
+            for voice in (
+                DEFAULT_PIPER_VOICES[AudioDirection.UPLINK],
+                DEFAULT_PIPER_VOICES[AudioDirection.DOWNLINK],
+            )
+            if not (self.piper_models_dir / f"{voice}.onnx").exists()
+            or not (self.piper_models_dir / f"{voice}.onnx.json").exists()
+        ]
+        if missing:
+            return self._fail(
+                "piper_models",
+                "Piper TTS",
+                (
+                    f"缺少 Piper voice 模型：{', '.join(missing)}"
+                    f"（{self.piper_models_dir}/）"
+                ),
+                (
+                    "下一步如何做：从 https://huggingface.co/rhasspy/piper-voices "
+                    f"下载 {' / '.join(f'`{v}.onnx + .onnx.json`' for v in missing)} "
+                    f"到 `{self.piper_models_dir}/`。"
+                ),
+            )
+        return self._pass(
+            "piper_models",
+            "Piper TTS",
+            f"两个默认 voice 模型已就位（{self.piper_models_dir.name}/）",
+        )
 
     def _afconvert_check(self) -> ReadinessCheck:
         path = shutil.which("afconvert")
