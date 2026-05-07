@@ -83,5 +83,9 @@ class EdgeTTSError(UserFacingError):
     """Edge-TTS 合成服务错误。"""
 
 
+class PiperTTSError(UserFacingError):
+    """Piper 本地 TTS 合成服务错误（含模型缺失、ONNX 推理失败等）。"""
+
+
 class WhisperError(UserFacingError):
     """Whisper.cpp 识别服务错误。"""
