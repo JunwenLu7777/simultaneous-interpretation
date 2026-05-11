@@ -121,3 +121,9 @@ exclude_lines = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
 ]
+
+[dependency-groups]
+dev = [
+    "mlx>=0.31.2",
+    "mlx-lm>=0.31.3",
+]

@@ -86,7 +86,7 @@ CHUNKS_CLI_OPTION = typer.Option(
     help="最多处理多少个分片；不传则持续监听直到 Ctrl+C。",
 )
 END_SILENCE_MS_CLI_OPTION = typer.Option(
-    280,
+    150,
     "--end-silence-ms",
     help="检测到人声后，尾部静音多少毫秒即收段。",
 )

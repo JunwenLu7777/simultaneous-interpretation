@@ -29,14 +29,14 @@ def test_prompt_uplink_specifies_zh_to_en() -> None:
     """上行 prompt 必须明确指出方向是中→英。"""
     prompt = build_system_prompt(AudioDirection.UPLINK, [])
 
-    assert "请将下列中文文本翻译为流畅自然的英文" in prompt
+    assert "将中文直接译为英文" in prompt
 
 
 def test_prompt_downlink_specifies_en_to_zh() -> None:
     """下行 prompt 必须明确指出方向是英→中。"""
     prompt = build_system_prompt(AudioDirection.DOWNLINK, [])
 
-    assert "请将下列英文文本翻译为流畅自然的中文" in prompt
+    assert "将英文直接译为中文" in prompt
 
 
 def test_prompt_rejects_oversized_glossary() -> None:
