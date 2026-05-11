@@ -8,6 +8,10 @@
 **与 `EdgeTTSClient` 输出 mp3 chunks 不同**；调用端必须按 raw PCM 处理，
 必要时重采样到目标设备 sample rate（生产管线集成时由 audio_writer 负责）。
 
+**并发**：ONNX InferenceSession 非线程安全，本类为每个 voice 维护一个实例池
+（默认 3 个），多会议场景下并发 `stream_synthesize` 调用自动分配到不同实例。
+池耗尽时调用方排队等待。
+
 模型缺失检查：`validate_voice` 仅检查 `<voice>.onnx` 与 `<voice>.onnx.json`
 两个文件存在；不做 SHA256 / 完整性校验（保留给 `cli/wizard.py` 在首次运行
 向导中处理）。
@@ -16,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -26,19 +31,17 @@ from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import PiperTTSError
 from teams_voice_interpreter.tts.edge_tts_client import TTSEvent
 
-# 与 `scripts/measure_piper_first_byte.py` 一致的默认音色映射；阶段 3 集成时
-# 由 `config.py` 的 `piper_voices` 配置覆盖。
 DEFAULT_PIPER_VOICES = {
     AudioDirection.UPLINK: "en_US-amy-medium",
     AudioDirection.DOWNLINK: "zh_CN-huayan-medium",
 }
 
-# Piper voice 默认采样率。两个项目默认 voice 当前都是 22050 Hz；如果未来引入
-# 16 kHz / 48 kHz voice，应当从 PiperVoice config 读取（保留给阶段 3b）。
 PIPER_OUTPUT_SAMPLE_RATE_HZ = 22050
-# TTSEvent.audio_format 标识：raw little-endian int16 mono PCM @ 22050 Hz。
-# 下游 (tts/audio_decode.decode_pcm_stream_to_pcm16) 按此分支。
 PIPER_AUDIO_FORMAT = f"pcm_s16le_{PIPER_OUTPUT_SAMPLE_RATE_HZ}"
+
+# 每 voice 默认实例池大小。多会议场景每个会议最多占用 2 个 voice（上下行），
+# 3 个实例足够覆盖 3-4 个并发会议（正常对话中上下行交替而非同时说话）。
+DEFAULT_POOL_SIZE = 3
 
 
 @dataclass(frozen=True)
@@ -46,8 +49,29 @@ class PiperVoiceLoaderProtocol:
     """供测试注入的 voice 加载器：接收 onnx 路径，返回 PiperVoice 实例。"""
 
 
+class _VoicePool:
+    """ONNX 实例池：PiperVoice 非线程安全，用池化支持并发调用。"""
+
+    def __init__(self, factory: Any, size: int) -> None:
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=size)
+        for _ in range(size):
+            self._queue.put(factory())
+
+    async def acquire(self) -> Any:
+        """从池中取一个空闲 voice 实例（阻塞直到有可用）。"""
+        return await asyncio.to_thread(self._queue.get)
+
+    def release(self, voice: Any) -> None:
+        """归还 voice 实例到池中。"""
+        self._queue.put(voice)
+
+    @property
+    def size(self) -> int:
+        return self._queue.maxsize
+
+
 class PiperClient:
-    """Piper TTS 客户端（同步 generator → 异步流）。
+    """Piper TTS 客户端（同步 generator → 异步流），内置 voice 实例池。
 
     复用 `TTSEvent` dataclass（与 `EdgeTTSClient` 共享），输出 raw PCM16
     bytes（22050 Hz mono）。
@@ -57,30 +81,19 @@ class PiperClient:
         self,
         models_dir: Path,
         *,
+        pool_size: int = DEFAULT_POOL_SIZE,
         voices: dict[AudioDirection, str] | None = None,
         voice_loader: Any | None = None,
     ) -> None:
-        """初始化 Piper 客户端。
-
-        Args:
-            models_dir: Piper voice 模型所在目录（含 `<voice>.onnx` 与
-                `<voice>.onnx.json`）。
-            voices: 方向到 voice 名的映射，覆盖 DEFAULT_PIPER_VOICES。
-            voice_loader: 测试注入；签名 `Callable[[str], PiperVoice]`。
-                生产环境为 None，运行时延迟 import `piper.PiperVoice`。
-        """
         self._models_dir = models_dir
+        self._pool_size = pool_size
         self._voices: dict[AudioDirection, str] = voices or dict(DEFAULT_PIPER_VOICES)
         self._voice_loader: Any | None = voice_loader
-        self._loaded: dict[str, Any] = {}
-        self._load_lock = threading.Lock()
+        self._pools: dict[str, _VoicePool] = {}
+        self._pools_lock = threading.Lock()
 
     def validate_voice(self, voice: str) -> None:
-        """校验 voice 模型文件存在。
-
-        与 `EdgeTTSClient.validate_voice`（音色枚举校验）语义不同 —— Piper 的
-        voice 表是文件系统上的 ONNX 模型，需要按文件存在性校验。
-        """
+        """校验 voice 模型文件存在。"""
         onnx_path = self._models_dir / f"{voice}.onnx"
         json_path = self._models_dir / f"{voice}.onnx.json"
         if not onnx_path.exists() or not json_path.exists():
@@ -96,10 +109,11 @@ class PiperClient:
             )
 
     def preload_voice(self, *, direction: AudioDirection, voice: str | None = None) -> None:
-        """提前加载指定方向的 voice，降低首个 TTS chunk 的 cold start 抖动。"""
+        """预加载指定方向的所有 pool 实例，消除首次调用冷启动。"""
         selected_voice = voice or self._voices[direction]
         self.validate_voice(selected_voice)
-        self._get_or_load(selected_voice)
+        pool = self._get_or_create_pool(selected_voice)
+        # 池初始化时已加载所有实例，此处仅触发创建
 
     async def stream_synthesize(
         self,
@@ -110,8 +124,8 @@ class PiperClient:
     ) -> AsyncIterator[TTSEvent]:
         """合成译文并流式返回 PCM16 音频块。
 
-        第一个 `kind="first_byte"` event 时刻即首字节延迟（与 EdgeTTSClient
-        语义一致，便于 readiness / observability 复用同套指标）。
+        从 voice 池中获取一个空闲实例执行合成，完成后归还。
+        若所有实例都在使用中则排队等待。
         """
         sanitized = text.strip()
         if not sanitized:
@@ -122,8 +136,17 @@ class PiperClient:
             )
         selected_voice = voice or self._voices[direction]
         self.validate_voice(selected_voice)
-        piper_voice = self._get_or_load(selected_voice)
+        pool = self._get_or_create_pool(selected_voice)
+        piper_voice = await pool.acquire()
+        try:
+            async for event in self._synthesize_with_voice(piper_voice, sanitized):
+                yield event
+        finally:
+            pool.release(piper_voice)
 
+    async def _synthesize_with_voice(
+        self, piper_voice: Any, sanitized: str
+    ) -> AsyncIterator[TTSEvent]:
         first = True
         try:
             iterator = await asyncio.to_thread(_make_iterator, piper_voice, sanitized)
@@ -149,7 +172,7 @@ class PiperClient:
                     )
         except PiperTTSError:
             raise
-        except Exception as error:  # ONNX runtime / IO / 模型损坏
+        except Exception as error:
             raise PiperTTSError(
                 code="tts.piper_synthesize_failed",
                 what_happened=f"发生了什么：Piper 合成失败：{type(error).__name__}: {error}。",
@@ -169,17 +192,20 @@ class PiperClient:
             )
         yield TTSEvent(kind="completed", audio_format=PIPER_AUDIO_FORMAT)
 
-    def _get_or_load(self, voice: str) -> Any:
-        with self._load_lock:
-            if voice not in self._loaded:
-                self._loaded[voice] = self._load_voice(voice)
-        return self._loaded[voice]
+    def _get_or_create_pool(self, voice: str) -> _VoicePool:
+        with self._pools_lock:
+            if voice not in self._pools:
+                self._pools[voice] = _VoicePool(
+                    factory=lambda v=voice: self._load_voice(v),
+                    size=self._pool_size,
+                )
+        return self._pools[voice]
 
     def _load_voice(self, voice: str) -> Any:
         onnx_path = self._models_dir / f"{voice}.onnx"
         if self._voice_loader is not None:
             return self._voice_loader(str(onnx_path))
-        from piper import PiperVoice as _PiperVoice  # 延迟 import
+        from piper import PiperVoice as _PiperVoice
 
         return _PiperVoice.load(str(onnx_path))
 

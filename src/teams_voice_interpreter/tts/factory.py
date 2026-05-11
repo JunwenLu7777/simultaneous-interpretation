@@ -61,6 +61,6 @@ def _cached_piper_client(settings: Settings) -> PiperClient:
     with _PIPER_CLIENTS_LOCK:
         client = _PIPER_CLIENTS.get(cache_key)
         if client is None:
-            client = PiperClient(models_dir=models_dir)
+            client = PiperClient(models_dir=models_dir, pool_size=settings.piper_pool_size)
             _PIPER_CLIENTS[cache_key] = client
         return client

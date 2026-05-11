@@ -54,8 +54,9 @@ def test_prewarm_tts_client_loads_direction_voice(monkeypatch, tmp_path: Path) -
     calls: list[AudioDirection] = []
 
     class FakePiperClient:
-        def __init__(self, *, models_dir: Path) -> None:
+        def __init__(self, *, models_dir: Path, pool_size: int = 3) -> None:
             self._models_dir = models_dir
+            self._pool_size = pool_size
 
         def preload_voice(self, *, direction: AudioDirection) -> None:
             calls.append(direction)

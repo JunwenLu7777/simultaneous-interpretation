@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Piper voice 模型目录（含 `<voice>.onnx` 与 `<voice>.onnx.json`）；
     # 空字符串回落到 `~/.cache/teams-voice-interpreter/piper-models`。
     piper_models_dir: str = ""
+    # Piper ONNX 实例池大小：每个 voice 最多同时合成 N 个流。
+    # 多会议场景每个会议最多占用 2 个 voice（上下行），默认 3 覆盖 3-4 个并发会议。
+    piper_pool_size: int = Field(default=3, ge=1, le=16)
     uplink_virtual_device_name: str = "BlackHole 2ch"
     downlink_virtual_device_name: str = ""
     allow_shared_virtual_device: bool = False
