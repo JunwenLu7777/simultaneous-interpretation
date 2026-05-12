@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import UserFacingError
 
 
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     tts_rate: str = "+20%"
+    uplink_tts_rate: str = ""
+    downlink_tts_rate: str = ""
     tts_engine: Literal["edge_tts", "piper"] = "piper"
     # Piper voice 模型目录（含 `<voice>.onnx` 与 `<voice>.onnx.json`）；
     # 空字符串回落到 `~/.cache/teams-voice-interpreter/piper-models`。
@@ -50,6 +53,12 @@ class Settings(BaseSettings):
     def resolved_downlink_virtual_device_name(self) -> str:
         """返回下行捕获使用的虚拟设备名；未配置时回落到上行设备名。"""
         return self.downlink_virtual_device_name or self.uplink_virtual_device_name
+
+    def resolve_tts_rate(self, direction: AudioDirection) -> str:
+        """按方向返回 TTS 语速；未配置时回落全局 ``tts_rate``。"""
+        if direction is AudioDirection.UPLINK:
+            return self.uplink_tts_rate or self.tts_rate
+        return self.downlink_tts_rate or self.tts_rate
 
     def silero_vad_model_path(self) -> Path:
         """返回 Silero VAD ONNX 模型缓存路径。"""

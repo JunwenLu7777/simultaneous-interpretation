@@ -256,6 +256,9 @@ def test_prepare_streaming_uses_one_tts_retry_to_recover_short_text_no_audio(  #
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
 
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
+
     async def _fake_pcm() -> AsyncIterator[np.ndarray]:
         yield np.array([1, 2], dtype=np.int16)
 
@@ -308,7 +311,7 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
             self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
             del text, direction, context_text
-            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="delta", text="Hello world from")
             await asyncio.to_thread(release_completed.wait)
             yield TranslationChunk(kind="completed", text="")
 
@@ -319,6 +322,9 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
+
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
 
     async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
         del kwargs
@@ -349,7 +355,7 @@ def test_prepare_streaming_returns_after_first_mt_delta_before_completed(  # typ
     finally:
         release_completed.set()
 
-    assert prepared.target_text == "Hello"
+    assert prepared.target_text == "Hello world from"
 
 
 def test_prepare_streaming_exposes_full_target_text_snapshot(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -363,8 +369,8 @@ def test_prepare_streaming_exposes_full_target_text_snapshot(monkeypatch) -> Non
             self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
             del text, direction, context_text
-            yield TranslationChunk(kind="delta", text="Hello")
-            yield TranslationChunk(kind="delta", text=" world")
+            yield TranslationChunk(kind="delta", text="Hello world from")
+            yield TranslationChunk(kind="delta", text=" Teams")
             yield TranslationChunk(kind="completed", text="")
 
     class _FakeSettings:
@@ -374,6 +380,9 @@ def test_prepare_streaming_exposes_full_target_text_snapshot(monkeypatch) -> Non
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
+
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
 
     async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
         del kwargs
@@ -404,8 +413,8 @@ def test_prepare_streaming_exposes_full_target_text_snapshot(monkeypatch) -> Non
     )
     asyncio.run(_drain(prepared.pcm_iterator))
 
-    assert prepared.target_text == "Hello"
-    assert prepared.pcm_iterator.target_text_snapshot() == "Hello world"
+    assert prepared.target_text == "Hello world from"
+    assert prepared.pcm_iterator.target_text_snapshot() == "Hello world from Teams"
 
 
 def test_prepare_streaming_cancels_first_tts_when_mt_fails_after_delta(  # type: ignore[no-untyped-def]
@@ -422,7 +431,7 @@ def test_prepare_streaming_cancels_first_tts_when_mt_fails_after_delta(  # type:
             self, text: str, *, direction: AudioDirection, context_text: str = ""
         ) -> AsyncIterator[TranslationChunk]:
             del text, direction, context_text
-            yield TranslationChunk(kind="delta", text="Hello")
+            yield TranslationChunk(kind="delta", text="Hello world from")
             await asyncio.sleep(0.05)
             raise live_say.DeepSeekError(
                 code="mt.network_error",
@@ -437,6 +446,9 @@ def test_prepare_streaming_cancels_first_tts_when_mt_fails_after_delta(  # type:
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
+
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
 
     async def _blocked_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
         del kwargs
@@ -500,6 +512,9 @@ def test_prepare_streaming_reuses_deepseek_http_client(monkeypatch) -> None:  # 
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
+
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
 
     async def _fake_pcm(**kwargs: object) -> AsyncIterator[np.ndarray]:
         del kwargs
@@ -577,6 +592,9 @@ def test_prepare_streaming_aborts_when_deepseek_stream_exceeds_budget(  # type: 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
 
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
+
     monkeypatch.setattr(live_say, "DeepSeekStreamingClient", _StuckDeepSeek)
     monkeypatch.setattr(live_say, "load_settings", lambda **_: _FakeSettings())
     monkeypatch.setattr(
@@ -624,6 +642,9 @@ def test_prepare_reuses_single_httpx_client_across_nonstreaming_calls(monkeypatc
 
         def resolved_deepseek_api_key(self) -> str:
             return "sk-test"
+
+        def resolve_tts_rate(self, direction: AudioDirection) -> str:
+            return self.tts_rate
 
     async def _fake_synthesize(*args: object, **kwargs: object) -> list[TTSEvent]:
         del args, kwargs

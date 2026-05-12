@@ -86,8 +86,12 @@ class EdgeTTSClient:
         *,
         direction: AudioDirection,
         voice: str | None = None,
+        rate: str | None = None,
     ) -> AsyncIterator[TTSEvent]:
-        """合成译文并流式返回音频块。"""
+        """合成译文并流式返回音频块。
+
+        rate 已在构造函数中设置，此处保留参数仅为接口兼容。
+        """
         selected_voice = voice or DEFAULT_VOICES[direction]
         self.validate_voice(selected_voice)
         sanitized = sanitize_text(text)

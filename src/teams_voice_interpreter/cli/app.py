@@ -86,7 +86,7 @@ CHUNKS_CLI_OPTION = typer.Option(
     help="最多处理多少个分片；不传则持续监听直到 Ctrl+C。",
 )
 END_SILENCE_MS_CLI_OPTION = typer.Option(
-    150,
+    700,
     "--end-silence-ms",
     help="检测到人声后，尾部静音多少毫秒即收段。",
 )
@@ -2582,5 +2582,5 @@ def _direction_for_target(
     raise UserFacingError(
         code="cli.target_invalid",
         what_happened=f"发生了什么：未知发声目标 `{target}`。",
-        next_action="下一步如何做：请使用 `--target blackhole` 或 `--target default`。",
+        next_action="下一步如何做：请使用 `--target blackhole`、`--target default`，或设备名并配合 `--direction`。",
     )

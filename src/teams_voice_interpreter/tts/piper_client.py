@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import re
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from piper.config import SynthesisConfig
 
 from teams_voice_interpreter.data.audio_segment import AudioDirection
 from teams_voice_interpreter.errors import PiperTTSError
@@ -121,11 +124,14 @@ class PiperClient:
         *,
         direction: AudioDirection,
         voice: str | None = None,
+        rate: str | None = None,
     ) -> AsyncIterator[TTSEvent]:
         """合成译文并流式返回 PCM16 音频块。
 
         从 voice 池中获取一个空闲实例执行合成，完成后归还。
         若所有实例都在使用中则排队等待。
+
+        rate 格式如 ``"+20%"``，转换为 Piper 的 ``length_scale``（值越低越快）。
         """
         sanitized = text.strip()
         if not sanitized:
@@ -134,22 +140,23 @@ class PiperClient:
                 what_happened="发生了什么：没有可合成的译文文本。",
                 next_action="下一步如何做：请等待下一段有效译文生成。",
             )
+        length_scale = _rate_to_length_scale(rate)
         selected_voice = voice or self._voices[direction]
         self.validate_voice(selected_voice)
         pool = self._get_or_create_pool(selected_voice)
         piper_voice = await pool.acquire()
         try:
-            async for event in self._synthesize_with_voice(piper_voice, sanitized):
+            async for event in self._synthesize_with_voice(piper_voice, sanitized, length_scale=length_scale):
                 yield event
         finally:
             pool.release(piper_voice)
 
     async def _synthesize_with_voice(
-        self, piper_voice: Any, sanitized: str
+        self, piper_voice: Any, sanitized: str, *, length_scale: float | None = None,
     ) -> AsyncIterator[TTSEvent]:
         first = True
         try:
-            iterator = await asyncio.to_thread(_make_iterator, piper_voice, sanitized)
+            iterator = await asyncio.to_thread(_make_iterator, piper_voice, sanitized, length_scale)
             while True:
                 chunk = await asyncio.to_thread(_next_chunk, iterator)
                 if chunk is _SENTINEL:
@@ -213,9 +220,29 @@ class PiperClient:
 _SENTINEL: object = object()
 
 
-def _make_iterator(voice: Any, text: str) -> Any:
-    """在 thread 内创建同步 generator iterator。"""
+def _make_iterator(voice: Any, text: str, length_scale: float | None = None) -> Any:
+    """在 thread 内创建同步 generator iterator；可传入 length_scale 控制语速。"""
+    if length_scale is not None:
+        syn_config = SynthesisConfig(length_scale=length_scale)
+        return iter(voice.synthesize(text, syn_config=syn_config))
     return iter(voice.synthesize(text))
+
+
+def _rate_to_length_scale(rate: str | None) -> float | None:
+    """把 ``"+20%"`` 格式的语速字符串转换为 Piper 的 ``length_scale``。
+
+    length_scale 值越低语速越快：+50% → 0.667, +20% → 0.833。
+    """
+    if not rate:
+        return None
+    match = re.match(r"^([+-])(\d+)%$", rate.strip())
+    if not match:
+        return None
+    sign, number = match.group(1), int(match.group(2))
+    factor = 1.0 + (number / 100.0) * (1.0 if sign == "+" else -1.0)
+    if factor <= 0:
+        return None
+    return round(1.0 / factor, 4)
 
 
 def _next_chunk(iterator: Any) -> Any:

@@ -32,6 +32,7 @@ from teams_voice_interpreter.errors import (
     UserFacingError,
 )
 from teams_voice_interpreter.mt.deepseek_client import DeepSeekStreamingClient, TranslationChunk
+from teams_voice_interpreter.mt.lang_utils import has_speakable_content, should_skip_translation
 from teams_voice_interpreter.tts.audio_decode import (
     decode_mp3_stream_to_pcm16,
     decode_pcm_stream_to_pcm16,
@@ -218,48 +219,53 @@ class LiveSayBridge:
         chunks: list[TranslationChunk] = []
         mt_first_token_at: float | None = None
 
-        async def _collect_translation() -> None:
-            nonlocal mt_first_token_at
-            async for chunk in DeepSeekStreamingClient(
-                api_key=settings.resolved_deepseek_api_key(),
-                model=settings.deepseek_model,
-                http_client=self._resolve_deepseek_http_client(),
-            ).stream_translate(
-                source_text,
-                direction=direction,
-                context_text=context_source_text,
-            ):
-                if not chunk.text:
-                    continue
-                if mt_first_token_at is None:
-                    mt_first_token_at = time.perf_counter()
-                chunks.append(chunk)
+        if should_skip_translation(source_text, direction=direction):
+            target_text = source_text.strip()
+            translated_at = translation_started
+            mt_first_token_latency_s = 0.0
+        else:
+            async def _collect_translation() -> None:
+                nonlocal mt_first_token_at
+                async for chunk in DeepSeekStreamingClient(
+                    api_key=settings.resolved_deepseek_api_key(),
+                    model=settings.deepseek_model,
+                    http_client=self._resolve_deepseek_http_client(),
+                ).stream_translate(
+                    source_text,
+                    direction=direction,
+                    context_text=context_source_text,
+                ):
+                    if not chunk.text:
+                        continue
+                    if mt_first_token_at is None:
+                        mt_first_token_at = time.perf_counter()
+                    chunks.append(chunk)
 
-        try:
-            await asyncio.wait_for(_collect_translation(), timeout=DEEPSEEK_STREAM_BUDGET_S)
-        except TimeoutError as error:
-            raise DeepSeekError(
-                code="mt.stream_budget_exceeded",
-                what_happened=(
-                    f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内未完成翻译；"
-                    "服务端 / 网络抖动，丢弃该段避免阻塞后续。"
-                ),
-                next_action=(
-                    "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
-                    "若反复触发，请检查网络或换 DeepSeek 接入点。"
-                ),
-            ) from error
-        translated_at = time.perf_counter()
-        mt_first_token_latency_s = (
-            mt_first_token_at - translation_started if mt_first_token_at is not None else 0.0
-        )
-        target_text = _target_text_from_chunks(chunks)
-        if not target_text:
-            raise UserFacingError(
-                code="say.empty_translation",
-                what_happened="发生了什么：DeepSeek 没有返回可播出的译文。",
-                next_action="下一步如何做：请稍后重试，或换一句更短的文本。",
+            try:
+                await asyncio.wait_for(_collect_translation(), timeout=DEEPSEEK_STREAM_BUDGET_S)
+            except TimeoutError as error:
+                raise DeepSeekError(
+                    code="mt.stream_budget_exceeded",
+                    what_happened=(
+                        f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内未完成翻译；"
+                        "服务端 / 网络抖动，丢弃该段避免阻塞后续。"
+                    ),
+                    next_action=(
+                        "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
+                        "若反复触发，请检查网络或换 DeepSeek 接入点。"
+                    ),
+                ) from error
+            translated_at = time.perf_counter()
+            mt_first_token_latency_s = (
+                mt_first_token_at - translation_started if mt_first_token_at is not None else 0.0
             )
+            target_text = _target_text_from_chunks(chunks)
+            if not target_text:
+                raise UserFacingError(
+                    code="say.empty_translation",
+                    what_happened="发生了什么：DeepSeek 没有返回可播出的译文。",
+                    next_action="下一步如何做：请稍后重试，或换一句更短的文本。",
+                )
         tts_started = time.perf_counter()
         audio_events = await self._synthesize_with_retry(
             target_text=target_text,
@@ -404,11 +410,14 @@ class LiveSayBridge:
             )
         if target == "default":
             return self.device_probe.get_default_output()
-        raise UserFacingError(
-            code="say.target_invalid",
-            what_happened=f"发生了什么：未知发声目标 `{target}`。",
-            next_action="下一步如何做：请使用 `blackhole` 或 `default`。",
-        )
+        try:
+            return self.device_probe.find_output_device_by_name(target)
+        except UserFacingError:
+            raise UserFacingError(
+                code="say.target_invalid",
+                what_happened=f"发生了什么：未知发声目标 `{target}`。",
+                next_action="下一步如何做：请使用 `blackhole`、`default` 或具体的设备名。",
+            )
 
 
 class _EarlyTranslationRuntime:
@@ -574,74 +583,109 @@ class _EarlyTranslationPCMStream:
             asyncio.to_thread(prewarm_tts_client, settings, direction=direction)
         )
         try:
-            iterator = DeepSeekStreamingClient(
-                api_key=settings.resolved_deepseek_api_key(),
-                model=settings.deepseek_model,
-                http_client=http_client_provider() if http_client_provider is not None else None,
-            ).stream_translate(
-                source_text,
-                direction=direction,
-                context_text=context_text,
-            )
-            try:
-                async with asyncio.timeout(DEEPSEEK_STREAM_BUDGET_S):
-                    async for chunk in iterator:
-                        if chunk.kind == "delta" and chunk.text:
-                            if mt_first_token_at is None:
-                                mt_first_token_at = time.perf_counter()
-                            pending_text = _join_text_delta(pending_text, chunk.text)
-                            if not emitted_first_piece and _is_early_tts_text_ready(pending_text):
-                                emitted_first_piece = True
-                                first_piece = pending_text.strip()
-                                pending_text = ""
-                                self._put_ready(
-                                    _EarlyTranslationReady(
-                                        target_text=first_piece,
-                                        translation_latency_s=(
-                                            time.perf_counter() - translation_started
-                                        ),
-                                        mt_first_token_latency_s=(
-                                            mt_first_token_at - translation_started
-                                        ),
-                                    )
-                                )
-                                first_tts_task = asyncio.create_task(
-                                    self._emit_tts_pcm(
-                                        first_piece,
-                                        direction=direction,
-                                        settings=settings,
-                                        first_byte_timeout_s=first_byte_timeout_s,
-                                        synthesis_timeout_s=synthesis_timeout_s,
-                                    )
-                                )
-                        elif chunk.kind == "completed":
-                            if chunk.text and not pending_text and not emitted_first_piece:
+            if should_skip_translation(source_text, direction=direction):
+                # 无需翻译：源文直接作为译文送入 TTS 管线
+                target_text = source_text.strip()
+                self._put_ready(
+                    _EarlyTranslationReady(
+                        target_text=target_text,
+                        translation_latency_s=0.0,
+                        mt_first_token_latency_s=0.0,
+                    )
+                )
+                first_tts_task = asyncio.create_task(
+                    self._emit_tts_pcm(
+                        target_text,
+                        direction=direction,
+                        settings=settings,
+                        first_byte_timeout_s=first_byte_timeout_s,
+                        synthesis_timeout_s=synthesis_timeout_s,
+                    )
+                )
+                emitted_first_piece = True
+                await self._finish_pending_translation(
+                    pending_text="",
+                    emitted_first_piece=True,
+                    mt_first_token_at=translation_started,
+                    translation_started=translation_started,
+                    direction=direction,
+                    settings=settings,
+                    first_byte_timeout_s=first_byte_timeout_s,
+                    synthesis_timeout_s=synthesis_timeout_s,
+                    first_tts_task=first_tts_task,
+                    prewarm_task=prewarm_task,
+                )
+            else:
+                iterator = DeepSeekStreamingClient(
+                    api_key=settings.resolved_deepseek_api_key(),
+                    model=settings.deepseek_model,
+                    http_client=http_client_provider() if http_client_provider is not None else None,
+                ).stream_translate(
+                    source_text,
+                    direction=direction,
+                    context_text=context_text,
+                )
+                try:
+                    async with asyncio.timeout(DEEPSEEK_STREAM_BUDGET_S):
+                        async for chunk in iterator:
+                            if chunk.kind == "delta" and chunk.text:
+                                if mt_first_token_at is None:
+                                    mt_first_token_at = time.perf_counter()
                                 pending_text = _join_text_delta(pending_text, chunk.text)
-                            break
-            except TimeoutError as error:
-                raise DeepSeekError(
-                    code="mt.stream_budget_exceeded",
-                    what_happened=(
-                        f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内"
-                        "未完成当前译文流；服务端 / 网络抖动，丢弃该段避免阻塞后续。"
-                    ),
-                    next_action=(
-                        "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
-                        "若反复触发，请检查网络或换 DeepSeek 接入点。"
-                    ),
-                ) from error
-            await self._finish_pending_translation(
-                pending_text=pending_text,
-                emitted_first_piece=emitted_first_piece,
-                mt_first_token_at=mt_first_token_at,
-                translation_started=translation_started,
-                direction=direction,
-                settings=settings,
-                first_byte_timeout_s=first_byte_timeout_s,
-                synthesis_timeout_s=synthesis_timeout_s,
-                first_tts_task=first_tts_task,
-                prewarm_task=prewarm_task,
-            )
+                                if not emitted_first_piece and _is_early_tts_text_ready(
+                                    pending_text, direction=direction
+                                ):
+                                    emitted_first_piece = True
+                                    first_piece = pending_text.strip()
+                                    pending_text = ""
+                                    self._put_ready(
+                                        _EarlyTranslationReady(
+                                            target_text=first_piece,
+                                            translation_latency_s=(
+                                                time.perf_counter() - translation_started
+                                            ),
+                                            mt_first_token_latency_s=(
+                                                mt_first_token_at - translation_started
+                                            ),
+                                        )
+                                    )
+                                    first_tts_task = asyncio.create_task(
+                                        self._emit_tts_pcm(
+                                            first_piece,
+                                            direction=direction,
+                                            settings=settings,
+                                            first_byte_timeout_s=first_byte_timeout_s,
+                                            synthesis_timeout_s=synthesis_timeout_s,
+                                        )
+                                    )
+                            elif chunk.kind == "completed":
+                                if chunk.text and not pending_text and not emitted_first_piece:
+                                    pending_text = _join_text_delta(pending_text, chunk.text)
+                                break
+                except TimeoutError as error:
+                    raise DeepSeekError(
+                        code="mt.stream_budget_exceeded",
+                        what_happened=(
+                            f"发生了什么：DeepSeek 在 {DEEPSEEK_STREAM_BUDGET_S:g} 秒内"
+                            "未完成当前译文流；服务端 / 网络抖动，丢弃该段避免阻塞后续。"
+                        ),
+                        next_action=(
+                            "下一步如何做：该段已丢弃，请保持通话继续；下一段会自动重试。"
+                            "若反复触发，请检查网络或换 DeepSeek 接入点。"
+                        ),
+                    ) from error
+                await self._finish_pending_translation(
+                    pending_text=pending_text,
+                    emitted_first_piece=emitted_first_piece,
+                    mt_first_token_at=mt_first_token_at,
+                    translation_started=translation_started,
+                    direction=direction,
+                    settings=settings,
+                    first_byte_timeout_s=first_byte_timeout_s,
+                    synthesis_timeout_s=synthesis_timeout_s,
+                    first_tts_task=first_tts_task,
+                    prewarm_task=prewarm_task,
+                )
         except asyncio.CancelledError:
             await self._cancel_background_tasks(first_tts_task, prewarm_task)
             raise
@@ -684,7 +728,7 @@ class _EarlyTranslationPCMStream:
         await prewarm_task
         if first_tts_task is not None:
             await first_tts_task
-        if not text:
+        if not text or not has_speakable_content(text):
             if not emitted_first_piece:
                 raise UserFacingError(
                     code="say.empty_translation",
@@ -725,7 +769,7 @@ class _EarlyTranslationPCMStream:
         async for pcm in stream_pcm_chunks_with_retry(
             target_text=text,
             direction=direction,
-            rate=settings.tts_rate,
+            rate=settings.resolve_tts_rate(direction),
             settings=settings,
             max_retries=1,
             first_byte_timeout_s=first_byte_timeout_s,
@@ -783,9 +827,16 @@ def _join_target_text_parts(parts: list[str]) -> str:
     return text
 
 
-def _is_early_tts_text_ready(text: str) -> bool:
-    """首个非空 MT delta 即可启动 TTS；剩余 delta 后续顺序补播。"""
-    return bool(text.strip())
+def _is_early_tts_text_ready(text: str, *, direction: AudioDirection) -> bool:
+    """MT delta 积累到可独立播出的最小单元再启动 TTS，避免单字碎片。"""
+    source = text.strip()
+    if not source:
+        return False
+    if source[-1] in {"。", "！", "？", ".", "!", "?"}:
+        return True
+    if direction is AudioDirection.DOWNLINK:
+        return len(source) >= 5
+    return len(source.split()) >= 3
 
 
 def _preview_text(text: str, *, max_length: int = 80) -> str:

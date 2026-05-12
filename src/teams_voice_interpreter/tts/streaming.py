@@ -246,7 +246,7 @@ async def _stream_events_with_retry(
             synthesis_timeout_s=synthesis_timeout_s,
         )
         try:
-            async for event in client.stream_synthesize(target_text, direction=direction):
+            async for event in client.stream_synthesize(target_text, direction=direction, rate=rate):
                 if event.audio_chunk:
                     emitted_audio = True
                 yield event
